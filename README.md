@@ -1,4 +1,4 @@
-# Harness Remote —— DeepSeek Harness 手机远程控制
+# Harness Pocket —— DeepSeek Harness 手机远程控制
 
 随时随地用手机远程控制电脑上的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)：发消息、看回复、切换对话、浏览文件。基于 **Tailscale 私有加密组网 + HTTPS**，公网零暴露，一键安装。
 

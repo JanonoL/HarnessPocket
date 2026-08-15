@@ -1,9 +1,9 @@
 {
-  "name": "harnessapp",
+  "name": "harness-pocket",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "DeepSeek Harness 移动端伴侣 App（只读）：查看对话、切换对话、浏览生成的文件与内容。",
+  "description": "Harness Pocket —— DeepSeek Harness 手机远程控制：随时随地用手机发消息、切换对话、浏览文件。",
   "scripts": {
     "start": "node server.js"
   },

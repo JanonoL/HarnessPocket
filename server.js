@@ -3,7 +3,7 @@
 // 纯 Node 内置能力，无第三方依赖。安全：只读 + 可选访问令牌 + 文件路径限制在工作区根内。
 
 import { createServer } from "node:http";
-import { readFileSync, statSync, existsSync } from "node:fs";
+import { readFileSync, statSync, existsSync, writeFileSync } from "node:fs";
 import { join, dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { networkInterfaces, homedir } from "node:os";
@@ -42,7 +42,12 @@ function loadConfig() {
     extraRoots: Array.isArray(fileCfg.extraRoots) ? fileCfg.extraRoots : [],
     maxFileBytes: intOr(fileCfg.maxFileBytes, null, 2 * 1024 * 1024)
   };
-  if (!cfg.accessToken) cfg.accessToken = randomBytes(9).toString("base64url");
+  if (!cfg.accessToken) {
+    cfg.accessToken = randomBytes(16).toString("base64url");
+    try {
+      writeFileSync(CONFIG_PATH, JSON.stringify({ port: cfg.port, host: cfg.host, accessToken: cfg.accessToken, extraRoots: cfg.extraRoots, maxFileBytes: cfg.maxFileBytes }, null, 2) + "\n");
+    } catch { /* 只读环境则忽略 */ }
+  }
   return cfg;
 }
 
