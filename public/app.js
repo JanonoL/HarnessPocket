@@ -603,6 +603,13 @@
     }
   }
 
+  // 支持 URL 携带令牌（?token=xxx）一键进入
+  const urlToken = new URLSearchParams(location.search).get("token");
+  if (urlToken) {
+    state.token = urlToken.trim();
+    localStorage.setItem("harn_token", state.token);
+  }
+
   // 首次进入
   if (state.token) {
     boot();
