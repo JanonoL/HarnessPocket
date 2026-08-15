@@ -1,0 +1,17 @@
+{
+  "id": "/",
+  "name": "Harness 伴侣",
+  "short_name": "Harness",
+  "description": "DeepSeek Harness 移动端伴侣：查看对话、切换对话、浏览生成的文件与内容。",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0d0f17",
+  "theme_color": "#0d0f17",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

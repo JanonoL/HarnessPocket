@@ -1,0 +1,29 @@
+# ===== 密钥 / 配置（含访问令牌，切勿提交）=====
+gateway.config.json
+config.json
+
+# ===== 日志 =====
+*.log
+gateway.log
+
+# ===== 下载得到的二进制（不入库，运行脚本会自动下载）=====
+cloudflared.exe
+tailscale-setup.exe
+
+# ===== 依赖 / 缓存 =====
+node_modules/
+.chrome-*/
+package-lock.json
+
+# ===== 临时 / 调试文件 =====
+*.tmp
+diag*.mjs
+verify*.mjs
+probe*.mjs
+capture-*.mjs
+test-*.mjs
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+desktop.ini

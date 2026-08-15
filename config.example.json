@@ -1,0 +1,7 @@
+{
+  "port": 3090,
+  "host": "0.0.0.0",
+  "accessToken": "",
+  "extraRoots": [],
+  "maxFileBytes": 2097152
+}

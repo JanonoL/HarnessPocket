@@ -1,0 +1,26 @@
+/* 移动端适配：由远程网关注入到 harness GUI 的 <head> 中。
+   类名来自当前部署的 harness 前端构建（CSS-in-JS 哈希），用 !important 覆盖。 */
+@media (max-width: 860px) {
+  /* 隐藏右侧详情列（trajectory/settings 面板），控制主界面以对话为主 */
+  .pI_x6G_detailsCol { display: none !important; }
+
+  /* 侧边栏展开时改为左侧抽屉覆盖层，避免挤压对话区 */
+  .pI_x6G_sidebarCol:has(.hHd-Xa_root:not(.hHd-Xa_collapsed)) {
+    position: fixed !important;
+    inset: 0 auto 0 0 !important;
+    z-index: 999 !important;
+    width: min(85vw, 340px) !important;
+    max-width: 340px !important;
+    box-shadow: 0 0 44px rgba(0, 0, 0, 0.6) !important;
+  }
+
+  /* 中列占满剩余宽度，允许横向收缩 */
+  .pI_x6G_centerCol { min-width: 0 !important; overflow: hidden !important; }
+
+  /* 输入框 16px，避免 iOS 聚焦自动放大 */
+  .uV2eYG_input { font-size: 16px !important; }
+
+  /* 加大主要按钮触控面积 */
+  .uV2eYG_primary { min-width: 44px !important; min-height: 44px !important; }
+  .hHd-Xa_iconButton { min-width: 40px !important; min-height: 40px !important; }
+}

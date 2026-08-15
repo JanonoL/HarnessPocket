@@ -1,0 +1,13 @@
+# Cloudflare 命名隧道配置模板（固定公网地址）
+# 用法：
+#   1. cloudflared.exe tunnel login          （浏览器授权登录）
+#   2. cloudflared.exe tunnel create harness  （创建隧道，输出一个 UUID）
+#   3. 把下面 tunnel 字段改成你的 UUID，hostname 改成你的域名
+#   4. cloudflared.exe tunnel --config cloudflared-config.yml run harness
+tunnel: 替换为你的隧道UUID
+credentials-file: C:\Users\<你的用户名>\.cloudflared\替换为你的UUID.json
+
+ingress:
+  - hostname: harness.你的域名.com
+    service: http://127.0.0.1:8443
+  - service: http_status:404
