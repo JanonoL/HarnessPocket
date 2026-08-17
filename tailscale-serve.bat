@@ -1,5 +1,5 @@
 @echo off
-chcp 65001 >nul
+chcp 936 >nul
 title Tailscale Serve 设置（登录 Tailscale 后运行）
 set "TS=C:\Program Files\Tailscale\tailscale.exe"
 

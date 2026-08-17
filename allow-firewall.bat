@@ -1,4 +1,5 @@
 @echo off
+chcp 936 >nul
 rem 以管理员身份运行：放行 HarnessApp 的 3090 端口（入站 TCP），让局域网内手机可以访问。
 rem 若端口改了，请把下面的 3090 改成 config.json 里的 port。
 net session >nul 2>&1

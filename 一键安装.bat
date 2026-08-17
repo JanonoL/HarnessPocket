@@ -1,5 +1,5 @@
 @echo off
-chcp 65001 >nul
+chcp 936 >nul
 setlocal EnableDelayedExpansion
 title DeepSeek Harness 手机远程控制 - 一键安装
 cd /d "%~dp0"

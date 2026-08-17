@@ -1,0 +1,7 @@
+* text=auto
+
+# Windows cmd/wscript 读取这些脚本时使用本机 ANSI 代码页（中文系统为 GBK/936），
+# 并且必须是 CRLF 行尾。Git 索引保存 UTF-8，检出到 Windows 时自动转换为 GBK + CRLF。
+*.bat text eol=crlf working-tree-encoding=GBK
+*.cmd text eol=crlf working-tree-encoding=GBK
+*.vbs text eol=crlf working-tree-encoding=GBK

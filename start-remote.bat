@@ -1,5 +1,5 @@
 @echo off
-chcp 65001 >nul
+chcp 936 >nul
 title DeepSeek Harness 远程访问（网关 + 隧道）
 cd /d "%~dp0"
 
@@ -9,8 +9,15 @@ if not exist cloudflared.exe (
   exit /b 1
 )
 
-echo [1/2] 启动远程网关（端口 8443，令牌认证）...
-start "HarnessGateway" cmd /c "node gateway.js"
+echo [1/2] 检查远程网关（端口 8443）...
+netstat -ano | findstr "127.0.0.1:8443" | findstr "LISTENING" >nul 2>nul
+if errorlevel 1 (
+  echo 未检测到网关，正在启动...
+  start "HarnessGateway" cmd /c "node gateway.js"
+  timeout /t 3 /nobreak >nul
+) else (
+  echo 网关已在运行，跳过启动。
+)
 
 echo [2/2] 启动 Cloudflare 临时隧道（把 8443 暴露到公网）...
 echo.

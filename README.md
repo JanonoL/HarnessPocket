@@ -58,6 +58,12 @@ tailscale serve --bg 127.0.0.1:8443   # 用 Tailscale Serve 提供 HTTPS
 node info.mjs                   # 查看访问地址和令牌
 ```
 
+### 🌐 公网访问（可选，谨慎使用）
+
+默认的 Tailscale 方案不是公网，手机必须登录同一 Tailscale 账号才能访问。若想让手机用流量/公网直接访问（不装 Tailscale），双击 `start-remote.bat`，使用 Cloudflare 临时隧道生成的 `https://xxxx.trycloudflare.com` 地址打开即可。
+
+> 注意：临时隧道地址每次重启都会变化；任何拿到该地址和访问令牌的人都能访问，请勿长期开启。
+
 ## 🛡 安全说明
 
 - **零公网暴露**：没有公网入口，只有你 Tailscale 账号内的设备能访问。

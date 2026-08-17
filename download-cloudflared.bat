@@ -1,5 +1,5 @@
 @echo off
-chcp 65001 >nul
+chcp 936 >nul
 title 下载 cloudflared
 cd /d "%~dp0"
 if exist cloudflared.exe (
