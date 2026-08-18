@@ -40,12 +40,31 @@
 - 电脑已装 [Node.js](https://nodejs.org)（LTS）。
 - 电脑上 DeepSeek Harness 能正常运行（`dsh web` 可打开 `http://127.0.0.1:3080`）。
 
-### 方案一：FRP 内网穿透（国内优化首选）
+### 方案一：FRP 内网穿透（国内优化首选，用户自助注册）
 
-1. 在 K8s/服务器部署 frps 服务端（见 `craftsmenOps/deploy/frp`）。
-2. 复制 `frpc.toml.example` 为 `frpc.toml`，填写服务端地址、token 和访问域名。
-3. 下载 `frpc.exe` 放到本目录，双击运行 `start-frp.bat`。
-4. 手机浏览器打开 `frpc.toml` 中配置的域名，输入访问令牌。
+1. 用手机或电脑浏览器打开注册页面：
+
+```text
+https://register.zhkjdream.com
+```
+
+2. 输入你的用户名（例如 `zhangsan`）和邀请码，点击注册。
+
+3. 注册成功后页面会返回：
+   - 专属访问域名，例如 `https://harness-zhangsan.zhkjdream.com`
+   - 完整的 `frpc.toml` 配置
+   - 这台电脑的网关访问令牌
+
+4. 把返回的 `frpc.toml` 内容保存到本目录：
+
+```text
+F:\workspacecraftsmen\craftsmen\harnessapp\frpc.toml
+```
+
+5. 双击运行 `start-frp.bat`。  
+   脚本会自动下载 `frpc.exe`（首次运行）、启动网关、连接 FRP 服务端。
+
+6. 手机浏览器打开注册时分配的专属域名，输入返回的网关令牌，即可远程控制 Harness。
 
 ### 方案二：Cloudflare 临时隧道（次选）
 
