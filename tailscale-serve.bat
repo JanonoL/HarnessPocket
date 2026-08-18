@@ -1,8 +1,11 @@
 @echo off
 chcp 936 >nul
-title Tailscale Serve 设置（登录 Tailscale 后运行）
+title Tailscale Serve 设置（备用：登录 Tailscale 后运行）
 set "TS=C:\Program Files\Tailscale\tailscale.exe"
 
+echo  [提示] 国内优化首选 FRP：start-frp.bat；次选 Cloudflare：start-remote.bat。
+echo  [提示] 本脚本为备用：Tailscale 私有组网。
+echo.
 echo [1/3] 检查 Tailscale 登录状态...
 "%TS%" status >nul 2>&1
 if errorlevel 1 (

@@ -9,5 +9,8 @@ if %errorlevel% neq 0 (
   exit /b 1
 )
 netsh advfirewall firewall add rule name="HarnessApp-3090" dir=in action=allow protocol=TCP localport=3090
-echo 已放行端口 3090。按任意键关闭。
+echo 已放行端口 3090（局域网访问）。
+netsh advfirewall firewall add rule name="HarnessApp-Tailscale-8443" dir=in action=allow protocol=TCP localport=8443 remoteip=100.64.0.0/10
+echo 已放行端口 8443（Tailscale 内网 IP 直连）。
+echo 按任意键关闭。
 pause >nul

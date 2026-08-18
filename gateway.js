@@ -170,7 +170,12 @@ function proxyHttp(req, res, bodyBuffer) {
   if (headers.origin !== undefined) headers.origin = targetOrigin;
   if (headers.referer !== undefined && /^https?:\/\//i.test(headers.referer)) headers.referer = targetOrigin + "/";
   delete headers["content-length"]; // 由 Node 重新计算
-  delete headers["accept-encoding"]; // 让响应不压缩，便于 HTML 注入与流式转发
+  // 仅对 HTML 请求禁用压缩（便于注入移动端 CSS/JS）；JS/CSS/图片/API 保留压缩，远端加载更快。
+  const pathname = req.url.split("?")[0].split("#")[0];
+  const isHtmlPath = pathname === "/" || pathname.endsWith("/") || /\.html?$/i.test(pathname);
+  if (isHtmlPath) {
+    headers["accept-encoding"] = "identity";
+  }
 
   const proxyReq = httpRequest({
     host: TARGET.hostname,
@@ -201,7 +206,6 @@ function proxyHttp(req, res, bodyBuffer) {
       if (isHtml && body.length > 0) body = Buffer.from(injectMobile(body.toString("utf8")));
       const outHeaders = { ...proxyRes.headers };
       delete outHeaders["content-length"];
-      delete outHeaders["content-encoding"];
       delete outHeaders["transfer-encoding"];
       outHeaders["content-length"] = body.length;
       res.writeHead(proxyRes.statusCode || 200, outHeaders);
@@ -341,7 +345,9 @@ server.listen(config.port, config.host, () => {
   lines.push(`  访问令牌:   ${config.token}`);
   lines.push("");
   lines.push("  本机验证: 打开 http://127.0.0.1:" + server.address().port + " 并用令牌登录。");
-  lines.push("  远程访问: 用隧道工具(cloudflared/tailscale)把本端口暴露到公网。");
+  lines.push("  国内优化首选: FRP 内网穿透（start-frp.bat）");
+  lines.push("  次选: Cloudflare 隧道（start-remote.bat）");
+  lines.push("  备用: Tailscale（tailscale-serve.bat）");
   lines.push("");
   console.log(lines.join("\n"));
 });
