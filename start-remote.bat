@@ -1,6 +1,6 @@
 @echo off
 chcp 936 >nul
-title DeepSeek Harness 远程访问（网关 + 隧道）
+title Harness Pocket 远程访问（次选：Cloudflare 隧道）
 cd /d "%~dp0"
 
 if not exist cloudflared.exe (
@@ -9,6 +9,9 @@ if not exist cloudflared.exe (
   exit /b 1
 )
 
+echo  [提示] 国内优化首选请运行 start-frp.bat（FRP 内网穿透）。
+echo  [提示] 本脚本为次选：Cloudflare 临时隧道（国外线路）。
+echo.
 echo [1/2] 检查远程网关（端口 8443）...
 netstat -ano | findstr "127.0.0.1:8443" | findstr "LISTENING" >nul 2>nul
 if errorlevel 1 (

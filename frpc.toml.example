@@ -1,0 +1,18 @@
+# Harness Pocket 远程访问 —— FRP 客户端配置（国内优化首选）
+# 复制本文件为 frpc.toml，并修改 serverAddr / auth.token / customDomains。
+#
+# serverAddr：FRP 服务端公网地址（K8s LoadBalancer EXTERNAL-IP 或域名）
+# serverPort：FRP 服务端 bindPort（默认 7000）
+# auth.token：必须与 frps 服务端配置一致
+# customDomains：K8s Ingress 分配的访问域名，例如 harness-baseservice.zhkjdream.com
+
+serverAddr = "替换为FRP服务端公网IP或域名"
+serverPort = 7000
+auth.token = "change-me-to-a-strong-token"
+
+[[proxies]]
+name = "harness-pocket-gateway"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 8443
+customDomains = ["harness-baseservice.zhkjdream.com"]
