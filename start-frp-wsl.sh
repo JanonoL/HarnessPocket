@@ -21,7 +21,7 @@ WINDOWS_HOST_IP=$(ip route show default | awk '{print $3; exit}')
 echo "Windows 主机地址: $WINDOWS_HOST_IP"
 
 # 把 frpc.toml 里的 localIP 从 127.0.0.1 改成 Windows 主机地址
-sed "s/^localIP = "127.0.0.1"/localIP = "$WINDOWS_HOST_IP"/" frpc.toml > /tmp/frpc-wsl.toml
+sed -e "s|^localIP = \"127.0.0.1\"|localIP = \"$WINDOWS_HOST_IP\"|" frpc.toml > /tmp/frpc-wsl.toml
 
 echo ""
 echo "手机访问地址："
