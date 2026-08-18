@@ -153,6 +153,7 @@ function loginPageHtml(error) {
 // HTML 注入：在 </head> 前插入移动端 CSS/JS
 // ---------------------------------------------------------------------------
 function injectMobile(html) {
+  if (process.env.HARNESS_GW_NO_INJECT === "1") return html;
   const tag = `<style data-harn-gw>${MOBILE_CSS}</style><script data-harn-gw>${MOBILE_JS}</script>`;
   if (html.includes("</head>")) return html.replace("</head>", tag + "</head>");
   if (html.includes("</HEAD>")) return html.replace("</HEAD>", tag + "</HEAD>");
@@ -308,7 +309,8 @@ server.on("upgrade", (req, socket, head) => {
     socket.destroy();
     return;
   }
-  gwLog(`WS UPGRADE ${req.url}`);
+  const wsIp = (req.headers["x-forwarded-for"] || socket.remoteAddress || "").toString().split(",")[0].trim();
+  gwLog(`WS UPGRADE ${wsIp} ${req.url}`);
   wss.handleUpgrade(req, socket, head, (clientWs) => {
     const targetUrl = `${TARGET.protocol === "https:" ? "wss" : "ws"}://${TARGET.host}${req.url}`;
     const upWs = new WebSocket(targetUrl, {
@@ -316,10 +318,31 @@ server.on("upgrade", (req, socket, head) => {
       origin: TARGET.protocol + "//" + TARGET.host
     });
     let closed = false;
-    const close = () => { if (!closed) { closed = true; try { clientWs.close(); } catch {} try { upWs.close(); } catch {} } };
+    let upCount = 0;
+    let downCount = 0;
+    const startedAt = Date.now();
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      gwLog(`WS CLOSE ${wsIp} ${req.url} after ${Date.now() - startedAt}ms down=${downCount} up=${upCount}`);
+      try { clientWs.close(); } catch {}
+      try { upWs.close(); } catch {}
+    };
     upWs.on("open", () => {
-      clientWs.on("message", (data) => { if (upWs.readyState === WebSocket.OPEN) upWs.send(data); });
-      upWs.on("message", (data) => { if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data); });
+      gwLog(`WS OPEN ${wsIp} ${req.url}`);
+      clientWs.on("message", (data) => { downCount += 1; if (upWs.readyState === WebSocket.OPEN) upWs.send(data); });
+      upWs.on("message", (data) => {
+        upCount += 1;
+        if (upCount === 1) gwLog(`WS FIRST_UP ${wsIp} ${req.url} type=${typeof data} isBuffer=${Buffer.isBuffer(data)}`);
+        // DSH 浏览器客户端只接受 text 帧；ws 库可能收到 Buffer，必须转成 UTF-8 字符串再转发。
+        let text;
+        if (typeof data === "string") text = data;
+        else if (Buffer.isBuffer(data)) text = data.toString("utf8");
+        else if (data instanceof ArrayBuffer) text = Buffer.from(data).toString("utf8");
+        else if (Array.isArray(data)) text = Buffer.concat(data.map((part) => Buffer.isBuffer(part) ? part : Buffer.from(part))).toString("utf8");
+        else text = String(data);
+        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(text);
+      });
       clientWs.on("close", close);
       upWs.on("close", close);
       clientWs.on("error", close);
