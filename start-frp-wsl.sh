@@ -23,5 +23,23 @@ echo "Windows 主机地址: $WINDOWS_HOST_IP"
 # 把 frpc.toml 里的 localIP 从 127.0.0.1 改成 Windows 主机地址
 sed "s/^localIP = "127.0.0.1"/localIP = "$WINDOWS_HOST_IP"/" frpc.toml > /tmp/frpc-wsl.toml
 
+echo ""
+echo "手机访问地址："
+grep -E 'customDomains' frpc.toml || true
+
+if [ -f gateway.config.json ]; then
+  GW_TOKEN=$(python3 - <<'PYEOF'
+import json
+try:
+    print(json.load(open('gateway.config.json', encoding='utf-8')).get('token',''))
+except Exception:
+    print('')
+PYEOF
+)
+  echo ""
+  echo "网关访问令牌：${GW_TOKEN}"
+fi
+
+echo ""
 echo "启动 frpc（WSL 模式）..."
 exec frpc -c /tmp/frpc-wsl.toml
