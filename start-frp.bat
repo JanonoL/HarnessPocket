@@ -86,5 +86,15 @@ echo.
 echo 网关访问令牌：
 for /f "tokens=*" %%t in ('node -e "console.log(require('./gateway.config.json').token)"') do echo   %%t
 echo.
+
+REM 如果 Windows 安全策略阻止 frpc.exe，自动切换到 WSL 模式
+frpc.exe --version >nul 2>&1
+if errorlevel 1 (
+  echo [提示] Windows frpc.exe 被系统阻止，自动切换到 WSL 模式...
+  wsl.exe bash /mnt/f/workspacecraftsmen/craftsmen/harnessapp/start-frp-wsl.sh
+  pause
+  exit /b 0
+)
+
 frpc.exe -c frpc.toml
 pause
