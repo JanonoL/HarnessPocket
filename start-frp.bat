@@ -14,13 +14,13 @@ if exist frpc.exe goto frpc_ready
 
 echo [1/4] 未找到 frpc.exe，开始自动下载（国内加速）...
 
-set "URL1=https://ghproxy.net/https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
+set "URL1=https://ghfast.top/https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
 set "URL2=https://gh-proxy.com/https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
-set "URL3=https://ghfast.top/https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
+set "URL3=https://ghproxy.net/https://github.com/fatedier/frp/releases/download/v0.61.0/frp_0.61.0_windows_amd64.zip"
 
-curl.exe -L --retry 3 --connect-timeout 20 -o frpc.zip "%URL1%"
-if errorlevel 1 curl.exe -L --retry 3 --connect-timeout 20 -o frpc.zip "%URL2%"
-if errorlevel 1 curl.exe -L --retry 3 --connect-timeout 20 -o frpc.zip "%URL3%"
+curl.exe -L -C - --retry 3 --connect-timeout 20 -o frpc.zip "%URL1%"
+if errorlevel 1 curl.exe -L -C - --retry 3 --connect-timeout 20 -o frpc.zip "%URL2%"
+if errorlevel 1 curl.exe -L -C - --retry 3 --connect-timeout 20 -o frpc.zip "%URL3%"
 if errorlevel 1 (
   echo [错误] 自动下载失败，请手动到 https://github.com/fatedier/frp/releases 下载
   echo        解压后把 frpc.exe 复制到本目录，再运行本脚本。

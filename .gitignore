@@ -9,6 +9,17 @@ gateway.log
 # ===== 下载得到的二进制（不入库，运行脚本会自动下载）=====
 cloudflared.exe
 tailscale-setup.exe
+frpc.exe
+frpc.zip
+frp_*/
+
+# ===== FRP 本地配置（含服务器地址/令牌，切勿提交）=====
+frpc.toml
+
+# ===== cloudflared 运行时文件 =====
+cf.out
+cf.err
+cf.pid
 
 # ===== 依赖 / 缓存 =====
 node_modules/
