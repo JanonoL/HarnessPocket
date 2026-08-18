@@ -79,7 +79,12 @@ if errorlevel 1 (
 
 REM ============ 4. 启动 frpc ============
 echo [4/4] 启动 FRP 客户端（国内优化线路）...
-echo 手机访问地址请使用 frpc.toml 中 customDomains 配置的域名。
+echo.
+echo 手机访问地址：
+for /f "tokens=*" %%d in ('findstr /C:"customDomains" frpc.toml') do echo   %%d
+echo.
+echo 网关访问令牌：
+for /f "tokens=*" %%t in ('node -e "console.log(require('./gateway.config.json').token)"') do echo   %%t
 echo.
 frpc.exe -c frpc.toml
 pause
