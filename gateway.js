@@ -274,6 +274,19 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // 无需登录即可访问的静态元数据（浏览器/PWA 会自动请求，401 会产生无害报错）
+  const PUBLIC_GET_PATHS = new Set([
+    "/manifest.webmanifest",
+    "/favicon.svg",
+    "/favicon.ico",
+    "/robots.txt"
+  ]);
+  if (!authed && req.method === "GET" && PUBLIC_GET_PATHS.has(url.pathname)) {
+    gwLog(`PUBLIC ${ip} ${req.method} ${url.pathname}`);
+    proxyHttp(req, res, null);
+    return;
+  }
+
   // 未认证：仅展示登录页（或对 API 返回 401）
   if (!authed) {
     gwLog(`UNAUTH ${ip} ${req.method} ${url.pathname} -> ${req.method === "GET" && (url.pathname === "/" || url.pathname === "") ? "登录页" : "401"}`);
