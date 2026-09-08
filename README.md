@@ -30,6 +30,7 @@
 
 - Harness 本体只监听 `127.0.0.1`，不直接暴露。
 - `gateway.js` 反向代理 HTTP + WebSocket + SSE，并注入移动端样式。
+- 新版 `dsh web` 自身还有一层浏览器认证（启动时打印的 `?token=` URL）。网关已内置 **dsh web 认证桥接**：手机登录网关后，网关会代表手机通过 dsh web 认证，因此手机端仍只需输入网关访问令牌，不需要 dsh web 的 token。
 - **国内优化首选 FRP**：需要先在 K8s/服务器部署 frps，公司电脑运行 `start-frp.bat`。
 - **Cloudflare 次选**：运行 `start-remote.bat`，生成临时公网地址。
 - **Tailscale 备用**：运行 `一键安装.bat`，手机安装 Tailscale 后访问。

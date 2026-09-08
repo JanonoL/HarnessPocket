@@ -5,10 +5,12 @@
 // 用法：node gateway.js   （配合 cloudflared / tailscale 等隧道暴露到公网）
 
 import { createServer } from "node:http";
-import { readFileSync, existsSync, appendFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { execFileSync } from "node:child_process";
+import { readFileSync, appendFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes, createHash, createHmac } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
 
@@ -102,6 +104,164 @@ function timingSafeEqual(a, b) {
 }
 
 // ---------------------------------------------------------------------------
+// dsh web 认证桥接
+// ---------------------------------------------------------------------------
+// 新版 dsh web 在本机 127.0.0.1:3080 上还有一层浏览器认证：只有打开 dsh web
+// 启动终端打印的、带 ?token= 的 URL 才能换到会话 Cookie。远程手机经过网关时
+// 看到的是：
+//
+//   dsh web authentication required; reopen the URL printed by dsh web.
+//
+// 那个 token 每次启动 dsh web 都会变，而且只打印在电脑终端里；把它当网关
+// “访问令牌”输入当然登不进去——这是两层不同的认证。
+//
+// dsh web 校验 Cookie 的 HMAC 密钥持久化在 $DSH_HOME/.credentials.yaml 的
+// client-connection/browser-session 记录中。网关与本机 dsh web 共享该文件，
+// 因此可以直接为转发目标（TARGET.host，也就是 dsh web 看到的 Host）签发合法
+// 的 dsh-auth-* Cookie。远程用户只需通过网关自己的令牌登录；dsh web 这一层
+// 由网关代认证，不再要求手机拿到 dsh web 的进程 token。
+// ---------------------------------------------------------------------------
+const DSH_COOKIE_PREFIX = "dsh-auth-";
+// dsh web 的 cookieMaxAgeDays 最小为 1 天；这里签发 1 天并自动续期，任何配置都兼容。
+const DSH_COOKIE_MAX_AGE_MS = 24 * 3600 * 1000;
+const DSH_SECRET_RELOAD_MS = 30 * 1000; // 网关先于 dsh web 启动时，凭据文件可能尚未生成
+const DSH_WSL_SECRET_RELOAD_MS = 5 * 60 * 1000; // WSL 凭据文件的重读间隔
+const DSH_WSL_READ_TIMEOUT_MS = 3000;
+const DSH_BASE64URL_PATTERN = /^[A-Za-z0-9_-]*$/;
+
+function dshBase64Url(value) {
+  return Buffer.from(value).toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+function decodeDshBase64Url(value) {
+  if (typeof value !== "string" || !DSH_BASE64URL_PATTERN.test(value) || value.length % 4 === 1) return null;
+  const padding = "=".repeat((4 - value.length % 4) % 4);
+  const decoded = Buffer.from(value.replaceAll("-", "+").replaceAll("_", "/") + padding, "base64");
+  return dshBase64Url(decoded) === value ? decoded : null;
+}
+
+function dshHome() {
+  const env = (process.env.DSH_HOME || "").trim();
+  if (!env) return join(homedir(), ".dsh");
+  if (env === "~") return homedir();
+  if (env.startsWith("~/") || env.startsWith("~\\")) return join(homedir(), env.slice(2));
+  return resolve(env);
+}
+
+function dshCredentialsPath() {
+  const override = (process.env.HARNESS_GW_DSH_CREDENTIALS || "").trim();
+  return override ? resolve(override) : join(dshHome(), ".credentials.yaml");
+}
+
+// 只取 client-connection/browser-session 记录里的 secret，避免引入 YAML 依赖。
+function extractDshBrowserSessionSecret(text) {
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const record = lines[i].match(/^(\s*)client-connection\/browser-session\s*:\s*$/);
+    if (!record) continue;
+    const recordIndent = record[1].length;
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      const nested = line.match(/^(\s*)(?:\S|$)/);
+      // 记录结束：遇到缩进不深于本记录的下一项（顶层键或 records 下的兄弟记录）。
+      if (nested && nested[1].length <= recordIndent && line.trim() !== "" && !line.trim().startsWith("#")) break;
+      const secret = line.match(/^(\s*)secret\s*:\s*(\S+)\s*$/);
+      if (secret && secret[1].length > recordIndent) return secret[2];
+    }
+  }
+  return null;
+}
+
+function canonicalDshSecret(raw) {
+  if (raw === null) return null;
+  const bytes = decodeDshBase64Url(raw);
+  return bytes !== null && bytes.byteLength === 32 ? bytes : null;
+}
+
+let dshFileSecretCache = { secret: null, checkedAt: 0 };
+function dshFileSecret() {
+  const now = Date.now();
+  if (now - dshFileSecretCache.checkedAt < DSH_SECRET_RELOAD_MS) return dshFileSecretCache.secret;
+  const path = dshCredentialsPath();
+  let secret = null;
+  try {
+    secret = canonicalDshSecret(extractDshBrowserSessionSecret(readFileSync(path, "utf8")));
+  } catch { /* 凭据文件不存在/不可读时保持网关原有行为 */ }
+  dshFileSecretCache = { secret, checkedAt: now };
+  return secret;
+}
+
+// 有些部署把 dsh web 跑在 WSL 里、网关跑在 Windows 上。此时 Windows 用户目录下
+// 的 .dsh/.credentials.yaml 往往没有 browser-session 记录；通过 wsl.exe 读默认
+// WSL 发行版 $HOME/.dsh/.credentials.yaml 作为回退。
+let dshWslSecretCache = { secret: null, checkedAt: 0 };
+function dshWslSecret() {
+  if (process.platform !== "win32") return null;
+  const now = Date.now();
+  if (now - dshWslSecretCache.checkedAt < DSH_WSL_SECRET_RELOAD_MS) return dshWslSecretCache.secret;
+  let secret = null;
+  try {
+    const raw = execFileSync("wsl.exe", ["-e", "sh", "-c", 'cat "$HOME/.dsh/.credentials.yaml"'], {
+      encoding: "utf8",
+      timeout: DSH_WSL_READ_TIMEOUT_MS,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    secret = canonicalDshSecret(extractDshBrowserSessionSecret(raw));
+  } catch { /* WSL 未运行或文件不存在 */ }
+  dshWslSecretCache = { secret, checkedAt: now };
+  return secret;
+}
+
+function currentDshSecret() {
+  return dshFileSecret() ?? dshWslSecret();
+}
+
+let dshAuthCookie = null;
+let dshAuthCookieExpiresAt = 0;
+let dshAuthCookieSecretKey = null;
+function currentDshAuthCookie() {
+  const secret = currentDshSecret();
+  if (secret === null) {
+    dshAuthCookie = null;
+    dshAuthCookieSecretKey = null;
+    return null;
+  }
+  const secretKey = dshBase64Url(secret);
+  const now = Date.now();
+  // 提前 1 小时续期；凭据文件里的签名密钥轮换后也立即重签。
+  if (dshAuthCookie !== null && dshAuthCookieSecretKey === secretKey && dshAuthCookieExpiresAt - now > 3600 * 1000) return dshAuthCookie;
+  const issuedAt = now;
+  const expiresAt = issuedAt + DSH_COOKIE_MAX_AGE_MS;
+  const payload = { version: 1, authority: TARGET.host, issuedAt, expiresAt };
+  const body = dshBase64Url(Buffer.from(JSON.stringify(payload), "utf8"));
+  const signature = dshBase64Url(createHmac("sha256", secret).update(body).digest());
+  const name = DSH_COOKIE_PREFIX + dshBase64Url(createHash("sha256").update(TARGET.host).digest());
+  dshAuthCookie = `${name}=v1.${body}.${signature}`;
+  dshAuthCookieExpiresAt = expiresAt;
+  dshAuthCookieSecretKey = secretKey;
+  return dshAuthCookie;
+}
+
+// 把 dsh web 的会话 Cookie 放在最前面；即使手机端碰巧也带了一个旧 Cookie，
+// dsh web 会取第一个匹配项，确保网关签发的这个优先生效。
+function withDshAuthCookie(headers) {
+  const cookie = currentDshAuthCookie();
+  if (cookie === null) return headers;
+  const existing = headers.cookie || headers.Cookie;
+  const next = { ...headers, cookie: existing ? `${cookie}; ${existing}` : cookie };
+  return next;
+}
+
+(function initDshAuthBridge() {
+  if (currentDshAuthCookie() !== null) {
+    gwLog(`DSH_AUTH bridge ready for ${TARGET.host}`);
+  } else {
+    gwLog(`DSH_AUTH bridge unavailable now; will retry: ${dshCredentialsPath()}`);
+  }
+})();
+
+// ---------------------------------------------------------------------------
 // 登录限流（按 IP）
 // ---------------------------------------------------------------------------
 const loginAttempts = new Map(); // ip -> { count, windowStart }
@@ -164,7 +324,7 @@ function injectMobile(html) {
 // HTTP 反向代理
 // ---------------------------------------------------------------------------
 function proxyHttp(req, res, bodyBuffer) {
-  const headers = { ...req.headers };
+  const headers = withDshAuthCookie({ ...req.headers });
   headers.host = TARGET.host; // 重写 Host 以通过 harness 信任栅栏
   // 重写 Origin / Referer，使其与重写后的 Host 同源，否则 harness 信任栅栏会 403
   const targetOrigin = TARGET.protocol + "//" + TARGET.host;
@@ -327,7 +487,7 @@ server.on("upgrade", (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (clientWs) => {
     const targetUrl = `${TARGET.protocol === "https:" ? "wss" : "ws"}://${TARGET.host}${req.url}`;
     const upWs = new WebSocket(targetUrl, {
-      headers: { host: TARGET.host },
+      headers: withDshAuthCookie({ host: TARGET.host }),
       origin: TARGET.protocol + "//" + TARGET.host
     });
     let closed = false;
@@ -343,7 +503,20 @@ server.on("upgrade", (req, socket, head) => {
     };
     upWs.on("open", () => {
       gwLog(`WS OPEN ${wsIp} ${req.url}`);
-      clientWs.on("message", (data) => { downCount += 1; if (upWs.readyState === WebSocket.OPEN) upWs.send(data); });
+      clientWs.on("message", (data) => {
+        downCount += 1;
+        // 浏览器 -> dsh web 也必须发 text 帧。ws 8 即使收到浏览器的 text 帧，
+        // 也可能以 Buffer 交给 message 事件；原样 send(Buffer) 会被 dsh web 当作
+        // binary 帧并关闭 /api/remote.mux，导致会话列表/对话内容流打不开。
+        let text;
+        if (typeof data === "string") text = data;
+        else if (Buffer.isBuffer(data)) text = data.toString("utf8");
+        else if (data instanceof ArrayBuffer) text = Buffer.from(data).toString("utf8");
+        else if (Array.isArray(data)) text = Buffer.concat(data.map((part) => Buffer.isBuffer(part) ? part : Buffer.from(part))).toString("utf8");
+        else text = String(data);
+        if (downCount === 1) gwLog(`WS FIRST_DOWN ${wsIp} ${req.url} type=${typeof data} isBuffer=${Buffer.isBuffer(data)} -> ${text.slice(0, 120)}`);
+        if (upWs.readyState === WebSocket.OPEN) upWs.send(text);
+      });
       upWs.on("message", (data) => {
         upCount += 1;
         if (upCount === 1) gwLog(`WS FIRST_UP ${wsIp} ${req.url} type=${typeof data} isBuffer=${Buffer.isBuffer(data)}`);
@@ -379,6 +552,7 @@ server.listen(config.port, config.host, () => {
   lines.push(`  监听地址:   http://${config.host}:${server.address().port}`);
   lines.push(`  转发目标:   ${config.target}`);
   lines.push(`  访问令牌:   ${config.token}`);
+  lines.push(`  dsh web 认证: ${currentDshAuthCookie() !== null ? "已桥接（登录网关即可，无需 dsh web token）" : "未桥接（将原样转发 dsh web 401）"}`);
   lines.push("");
   lines.push("  本机验证: 打开 http://127.0.0.1:" + server.address().port + " 并用令牌登录。");
   lines.push("  国内优化首选: FRP 内网穿透（start-frp.bat）");
