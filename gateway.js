@@ -1,14 +1,15 @@
 // DeepSeek Harness 远程网关：安全的远程访问（控制）层。
 // - 真认证：令牌登录 → 签名会话 Cookie（HttpOnly），登录失败限流。
 // - 反向代理 HTTP + WebSocket 到本机 harness GUI（127.0.0.1:3080），重写 Host 通过 harness 的信任栅栏。
+// - 自动代本机签出 harness（dsh web）自己的会话 Cookie 并注入，见下方「harness 会话 Cookie」小节。
 // - 向 harness 的 HTML 注入移动端 CSS/JS，让手机浏览器可用。
-// 用法：node gateway.js   （配合 cloudflared / tailscale 等隧道暴露到公网）
+// 用法：node gateway.js   （配合 cloudflared / tailscale / frp 等隧道暴露到公网）
 
 import { createServer } from "node:http";
-import { readFileSync, existsSync, appendFileSync, writeFileSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes, createHash, createHmac } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
 
@@ -35,6 +36,10 @@ function loadConfig() {
     host: env.HARNESS_GW_HOST || fileCfg.host || "127.0.0.1",
     target: env.HARNESS_GW_TARGET || fileCfg.target || "http://127.0.0.1:3080",
     token: env.HARNESS_GW_TOKEN || fileCfg.token || "",
+    // harness（dsh web）自身的会话 Cookie 处理：auto = 用本机密钥自动签发并注入（默认）
+    dshAuth: env.HARNESS_GW_DSH_AUTH ? env.HARNESS_GW_DSH_AUTH !== "0" : fileCfg.dshAuth !== false,
+    // 本机 harness 凭据文件（内含会话签名密钥）；默认 %DSH_HOME%\.credentials.yaml
+    dshCredentialsPath: env.HARNESS_GW_DSH_CREDENTIALS || fileCfg.dshCredentialsPath || "",
     sessionTtlMs: 30 * 24 * 3600 * 1000,
     loginRateLimit: 5,       // 每 IP 每窗口最多失败次数
     loginWindowMs: 15 * 60 * 1000
@@ -99,6 +104,93 @@ function timingSafeEqual(a, b) {
   const ha = createHash("sha256").update(a).digest();
   const hb = createHash("sha256").update(b).digest();
   return ha.equals(hb);
+}
+
+// ---------------------------------------------------------------------------
+// harness（dsh web）会话 Cookie：为什么必须有这一段
+// ---------------------------------------------------------------------------
+// dsh web 除了网关这层令牌登录外，自己还有一层「按 Host 绑定」的浏览器会话：
+//   Cookie 名 = dsh-auth-<base64url(sha256(权威, 即 Host 头))>
+//   Cookie 值 = v1.<base64url(载荷)>.<base64url(HMAC-SHA256(密钥, 载荷))>
+// 正常途径是打开 dsh web 启动时打印的 http://127.0.0.1:3080/?token=... 换一次 Cookie，
+// 但那个地址是电脑本机回环地址，手机永远打不开。于是手机过得了网关这层，却在
+// dsh web 这层被拒，页面只显示一行英文：
+//   dsh web authentication required; reopen the URL printed by dsh web.
+// 解决：网关用本机 harness 凭据文件里的持久密钥，自己签一个「目标权威」的会话 Cookie，
+// 覆盖客户端可能带来的同名旧 Cookie 后注入到上游。密钥持久存在，重启网关/重启 dsh web 都不用重新配对。
+const DSH_COOKIE_PREFIX = "dsh-auth-";
+const DSH_COOKIE_TTL_MS = 25 * 24 * 3600 * 1000;      // dsh 上限 30 天，这里取 25 天留余量
+const DSH_COOKIE_REFRESH_MS = 6 * 3600 * 1000;        // 剩余不足 6 小时就重签
+const DSH_HOME = process.env.DSH_HOME || join(process.env.USERPROFILE || process.env.HOME || ".", ".dsh");
+const DSH_CREDENTIALS_PATH = config.dshCredentialsPath || join(DSH_HOME, ".credentials.yaml");
+
+function base64url(buf) {
+  return Buffer.from(buf).toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+// 读取 harness 持久会话密钥（client-connection/browser-session 记录）
+function readDshSecret() {
+  let yaml;
+  try { yaml = readFileSync(DSH_CREDENTIALS_PATH, "utf8"); } catch { return null; }
+  const m = /client-connection\/browser-session:[\s\S]*?secret:\s*([A-Za-z0-9_-]{20,})/u.exec(yaml);
+  if (!m) return null;
+  const text = m[1];
+  const pad = "=".repeat((4 - (text.length % 4)) % 4);
+  const secret = Buffer.from(text.replaceAll("-", "+").replaceAll("_", "/") + pad, "base64");
+  return secret.byteLength === 32 ? secret : null;
+}
+
+let dshCookieCache = null;
+let dshSecretWarned = false;
+
+// 返回注入用的 Cookie 片段（形如 name=value），不可用时返回 null
+function dshSessionCookie() {
+  if (!config.dshAuth) return null;
+  const now = Date.now();
+  if (dshCookieCache && dshCookieCache.expiresAt - now > DSH_COOKIE_REFRESH_MS) return dshCookieCache;
+  const secret = readDshSecret();
+  if (secret === null) {
+    if (!dshSecretWarned) {
+      dshSecretWarned = true;
+      gwLog(`DSH-AUTH 未读到会话密钥（${DSH_CREDENTIALS_PATH}），将只做普通转发；若手机端只看到 "dsh web authentication required" 就是这里没读到`);
+    }
+    return null;
+  }
+  const authority = TARGET.host;   // 网关改写后的 Host 头，dsh web 就是按它校验
+  const name = DSH_COOKIE_PREFIX + base64url(createHash("sha256").update(authority).digest());
+  const expiresAt = now + DSH_COOKIE_TTL_MS;
+  const body = base64url(Buffer.from(JSON.stringify({ version: 1, authority, issuedAt: now, expiresAt }), "utf8"));
+  const value = `v1.${body}.${base64url(createHmac("sha256", secret).update(body).digest())}`;
+  dshCookieCache = { name, expiresAt, header: `${name}=${value}` };
+  dshSecretWarned = false;
+  gwLog(`DSH-AUTH 已签发 harness 会话 Cookie（authority=${authority}，有效至 ${new Date(expiresAt).toISOString()}）`);
+  return dshCookieCache;
+}
+
+// 换掉客户端带来的同名/同前缀旧 Cookie：dsh 只认 Cookie 头里第一个匹配的名字
+function stripDshCookies(cookieHeader) {
+  if (typeof cookieHeader !== "string" || cookieHeader === "") return "";
+  return cookieHeader
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part !== "" && !part.startsWith(DSH_COOKIE_PREFIX))
+    .join("; ");
+}
+
+// 就地改写转发用的请求头：注入 harness 会话 Cookie
+function injectDshCookie(headers) {
+  const cookie = dshSessionCookie();
+  if (cookie === null) return;
+  const rest = stripDshCookies(headers.cookie);
+  headers.cookie = rest === "" ? cookie.header : `${rest}; ${cookie.header}`;
+}
+
+// 上游明确 401 说明签名/密钥对不上了，丢弃缓存下次请求重签
+function onDshUnauthorized(statusCode) {
+  if (statusCode === 401 && dshCookieCache !== null) {
+    gwLog("DSH-AUTH 上游返回 401，丢弃缓存，下次请求重新签发");
+    dshCookieCache = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +263,8 @@ function proxyHttp(req, res, bodyBuffer) {
   if (headers.origin !== undefined) headers.origin = targetOrigin;
   if (headers.referer !== undefined && /^https?:\/\//i.test(headers.referer)) headers.referer = targetOrigin + "/";
   delete headers["content-length"]; // 由 Node 重新计算
+  // 注入 harness（dsh web）自己的会话 Cookie，否则上游只回一行 "dsh web authentication required"
+  injectDshCookie(headers);
   // 仅对 HTML 请求禁用压缩（便于注入移动端 CSS/JS）；JS/CSS/图片/API 保留压缩，远端加载更快。
   const pathname = req.url.split("?")[0].split("#")[0];
   const isHtmlPath = pathname === "/" || pathname.endsWith("/") || /\.html?$/i.test(pathname);
@@ -185,6 +279,7 @@ function proxyHttp(req, res, bodyBuffer) {
     method: req.method,
     headers
   }, (proxyRes) => {
+    onDshUnauthorized(proxyRes.statusCode);
     const contentType = proxyRes.headers["content-type"] || "";
     const isHtml = /text\/html/.test(contentType);
     const isEventStream = /text\/event-stream/.test(contentType);
@@ -326,42 +421,65 @@ server.on("upgrade", (req, socket, head) => {
   gwLog(`WS UPGRADE ${wsIp} ${req.url}`);
   wss.handleUpgrade(req, socket, head, (clientWs) => {
     const targetUrl = `${TARGET.protocol === "https:" ? "wss" : "ws"}://${TARGET.host}${req.url}`;
+    // WebSocket 同样要带 harness 会话 Cookie（客户端带来的 Cookie 一并转发，便于未来上游扩展）
+    const upHeaders = { host: TARGET.host, cookie: req.headers.cookie || "" };
+    injectDshCookie(upHeaders);
     const upWs = new WebSocket(targetUrl, {
-      headers: { host: TARGET.host },
+      headers: upHeaders,
       origin: TARGET.protocol + "//" + TARGET.host
     });
     let closed = false;
     let upCount = 0;
     let downCount = 0;
+    const pending = [];   // 上游握手完成前收到的客户端帧
     const startedAt = Date.now();
-    const close = () => {
+    // DSH 的流式通道只接受 text 帧（上游收到二进制帧会以 1003 关闭），两个方向都要转成 UTF-8 字符串。
+    const asText = (data) => {
+      if (typeof data === "string") return data;
+      if (Buffer.isBuffer(data)) return data.toString("utf8");
+      if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
+      if (Array.isArray(data)) return Buffer.concat(data.map((part) => Buffer.isBuffer(part) ? part : Buffer.from(part))).toString("utf8");
+      return String(data);
+    };
+    const close = (side, code, reason) => {
       if (closed) return;
       closed = true;
-      gwLog(`WS CLOSE ${wsIp} ${req.url} after ${Date.now() - startedAt}ms down=${downCount} up=${upCount}`);
+      const text = reason === undefined || reason === null || reason.length === 0 ? "" : ` reason=${reason.toString()}`;
+      gwLog(`WS CLOSE(${side}) ${wsIp} ${req.url} code=${code}${text} after ${Date.now() - startedAt}ms down=${downCount} up=${upCount}`);
       try { clientWs.close(); } catch {}
       try { upWs.close(); } catch {}
     };
+    const fail = (side, err) => {
+      gwLog(`WS ERROR(${side}) ${wsIp} ${req.url} ${err.message}`);
+      close(`${side}-error`, 1006, err.message);
+    };
     upWs.on("open", () => {
       gwLog(`WS OPEN ${wsIp} ${req.url}`);
-      clientWs.on("message", (data) => { downCount += 1; if (upWs.readyState === WebSocket.OPEN) upWs.send(data); });
-      upWs.on("message", (data) => {
+      const queued = pending.length;
+      for (const frame of pending) if (upWs.readyState === WebSocket.OPEN) upWs.send(frame);
+      pending.length = 0;
+      if (queued > 0) gwLog(`WS FLUSH ${wsIp} ${req.url} 补发握手期间缓存的 ${queued} 帧`);
+      upWs.on("message", (data, isBinary) => {
         upCount += 1;
-        if (upCount === 1) gwLog(`WS FIRST_UP ${wsIp} ${req.url} type=${typeof data} isBuffer=${Buffer.isBuffer(data)}`);
-        // DSH 浏览器客户端只接受 text 帧；ws 库可能收到 Buffer，必须转成 UTF-8 字符串再转发。
-        let text;
-        if (typeof data === "string") text = data;
-        else if (Buffer.isBuffer(data)) text = data.toString("utf8");
-        else if (data instanceof ArrayBuffer) text = Buffer.from(data).toString("utf8");
-        else if (Array.isArray(data)) text = Buffer.concat(data.map((part) => Buffer.isBuffer(part) ? part : Buffer.from(part))).toString("utf8");
-        else text = String(data);
-        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(text);
+        if (upCount === 1) gwLog(`WS FIRST_UP ${wsIp} ${req.url} isBinary=${isBinary} isBuffer=${Buffer.isBuffer(data)}`);
+        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(asText(data));
       });
-      clientWs.on("close", close);
-      upWs.on("close", close);
-      clientWs.on("error", close);
-      upWs.on("error", close);
+      upWs.on("close", (code, reason) => close("upstream", code, reason));
+      upWs.on("error", (err) => fail("upstream", err));
     });
-    upWs.on("error", close);
+    // 客户端消息监听必须立刻挂上：上游握手是异步的，早到的帧先缓存，否则会被静默丢掉
+    // （DSH 客户端握手后马上发第一条 open 帧，丢了就一直等不到 ready，表现为反复重连）。
+    clientWs.on("message", (data, isBinary) => {
+      downCount += 1;
+      if (downCount === 1) gwLog(`WS FIRST_DOWN ${wsIp} ${req.url} isBinary=${isBinary}`);
+      const frame = asText(data);
+      if (upWs.readyState === WebSocket.OPEN) upWs.send(frame);
+      else if (upWs.readyState === WebSocket.CONNECTING) pending.push(frame);
+    });
+    clientWs.on("close", (code, reason) => close("client", code, reason));
+    clientWs.on("error", (err) => fail("client", err));
+    upWs.on("close", (code, reason) => close("upstream", code, reason));
+    upWs.on("error", (err) => fail("upstream", err));
   });
 });
 
@@ -379,6 +497,7 @@ server.listen(config.port, config.host, () => {
   lines.push(`  监听地址:   http://${config.host}:${server.address().port}`);
   lines.push(`  转发目标:   ${config.target}`);
   lines.push(`  访问令牌:   ${config.token}`);
+  lines.push(`  harness 会话: ${config.dshAuth ? (dshSessionCookie() === null ? "未读到密钥（将只做普通转发）" : "已自动签发并注入") : "已关闭自动注入"}`);
   lines.push("");
   lines.push("  本机验证: 打开 http://127.0.0.1:" + server.address().port + " 并用令牌登录。");
   lines.push("  国内优化首选: FRP 内网穿透（start-frp.bat）");

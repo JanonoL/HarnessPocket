@@ -30,6 +30,7 @@
 
 - Harness 本体只监听 `127.0.0.1`，不直接暴露。
 - `gateway.js` 反向代理 HTTP + WebSocket + SSE，并注入移动端样式。
+- **两层认证都要过**：网关这层是访问令牌；Harness（`dsh web`）自己还有一层「按 Host 绑定签名 Cookie」的浏览器会话。手机打不开 Harness 启动时打印的 `http://127.0.0.1:3080/?token=...`，所以网关会用本机 `%DSH_HOME%\.credentials.yaml` 里的持久密钥自动签一个该会话 Cookie 并注入，无需人工配对。
 - **国内优化首选 FRP**：需要先在 K8s/服务器部署 frps，公司电脑运行 `start-frp.bat`。
 - **Cloudflare 次选**：运行 `start-remote.bat`，生成临时公网地址。
 - **Tailscale 备用**：运行 `一键安装.bat`，手机安装 Tailscale 后访问。
@@ -87,6 +88,13 @@ F:\workspacecraftsmen\craftsmen\harnessapp\frpc.toml
 | `gateway.config.json` | 网关配置（端口/令牌/转发目标）。首次运行自动生成随机令牌。 |
 | `gateway.config.example.json` | 配置模板（不含令牌）。 |
 
+可选字段（一般不用改）：
+
+| 字段 | 说明 | 默认 |
+| --- | --- | --- |
+| `dshAuth` | 是否自动签发并注入 Harness 自己的会话 Cookie | `true` |
+| `dshCredentialsPath` | Harness 凭据文件路径（内含会话签名密钥） | `%DSH_HOME%\.credentials.yaml` |
+
 访问令牌可手动修改，或运行 `node info.mjs` 查看当前地址与令牌。
 
 ## 🔧 手动启动
@@ -103,6 +111,25 @@ node info.mjs                   # 查看访问地址和令牌
 3. **Tailscale（备用）**：`tailscale serve --bg 127.0.0.1:8443`，手机安装 Tailscale 后访问。
 
 > 注意：公网地址暴露给所有知道地址的人，安全性依赖访问令牌，请勿长期开启不必要的入口。
+
+## 🩺 排查
+
+**症状：手机输入网关令牌后登录成功，页面却只显示一行英文**
+`dsh web authentication required; reopen the URL printed by dsh web.`
+
+这是 Harness（`dsh web`）自己那层认证没过：它只认「用启动时打印的 `?token=...` 换来的、按 Host 绑定的签名 Cookie」，而那个地址是电脑本机回环地址，手机打不开。正常情况网关会自动用本机 `%DSH_HOME%\.credentials.yaml` 里的持久密钥签一个并注入，出现这个提示说明密钥没读到。
+
+排查步骤：
+1. 看 `gateway.log` 里有没有 `DSH-AUTH 已签发 harness 会话 Cookie`；若是 `DSH-AUTH 未读到会话密钥`，检查 `%DSH_HOME%\.credentials.yaml` 里是否有 `client-connection/browser-session` 记录（`DSH_HOME` 默认 `C:\Users\<你>\.dsh`）。
+2. 跑一次自检（分别验证页面、接口和 WebSocket 流）：
+
+```bash
+node scratch/probe-gateway-remote.mjs        # 期望：GET / 为 200 HTML；WS 打开 $events 流能收到 ready
+```
+
+3. 改完 `gateway.js` 必须重启网关（`start-gateway.bat` 或开机自启脚本），改动不会热加载。
+
+**手机页面能开但一直转圈/反复重连**：看 `gateway.log` 的 `WS CLOSE(...)` 行。桥接层已处理两种常见原因：客户端握手后马上发出的第一帧会先缓存再补发（否则丢失后收不到 `ready`，表现为反复重连），以及二进制帧统一转成 text 帧转发（Harness 的流式通道只接受 text 帧）。
 
 ## 🛡 安全说明
 
