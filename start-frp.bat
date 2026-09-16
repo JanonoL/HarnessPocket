@@ -96,5 +96,14 @@ if errorlevel 1 (
   exit /b 0
 )
 
+REM 如果已经有 frpc 在跑（例如自愈守护刚拉起过），不要再启动第二个：重复注册会报 proxy already exists
+tasklist /fi "imagename eq frpc.exe" 2>nul | findstr /i "frpc.exe" >nul
+if not errorlevel 1 (
+  echo [提示] 检测到 frpc.exe 已经在运行，本次不再重复启动。
+  echo         手机若打不开，请双击 restart-frpc.bat 重启隧道（它会先结束旧进程）。
+  pause
+  exit /b 0
+)
+
 frpc.exe -c frpc.toml
 pause

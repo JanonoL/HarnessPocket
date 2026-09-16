@@ -20,6 +20,7 @@
 - 🅰 **次选**：`start-remote.bat` 走 Cloudflare 临时隧道，无需手机安装客户端。
 - 🅱 **备用**：`一键安装.bat` 自动装 Tailscale、配置开机自启、配置 HTTPS。
 - 🖥 **手机界面适配**：自动注入移动端样式，隐藏桌面端详情面板、侧边栏变抽屉。
+- 🔁 **自愈守护（可选）**：`安装自愈守护.bat` 注册每 5 分钟自检，网关掉线自动拉起、FRP 隧道注册丢失自动重启 `frpc.exe`。
 
 ## 🏗 架构
 
@@ -34,6 +35,7 @@
 - **国内优化首选 FRP**：需要先在 K8s/服务器部署 frps，公司电脑运行 `start-frp.bat`。
 - **Cloudflare 次选**：运行 `start-remote.bat`，生成临时公网地址。
 - **Tailscale 备用**：运行 `一键安装.bat`，手机安装 Tailscale 后访问。
+- **保活**：网关由 `HarnessRemoteGateway` 计划任务在登录时自动启动；`watchdog.mjs`（可选，每 5 分钟）负责运行期掉线自愈——这两类故障都真实发生过：网关随 Harness 进程一起被杀、`frpc` 在服务端的注册悄悄失效（表现为 frp 自己的 404 页）。
 
 ## 🚀 快速开始
 
@@ -66,6 +68,8 @@ F:\workspacecraftsmen\craftsmen\harnessapp\frpc.toml
    脚本会自动下载 `frpc.exe`（首次运行）、启动网关、连接 FRP 服务端。
 
 6. 手机浏览器打开注册时分配的专属域名，输入返回的网关令牌，即可远程控制 Harness。
+
+7. 建议双击一次 `安装自愈守护.bat`：注册一个每 5 分钟自检的计划任务，网关掉线自动拉起、FRP 隧道注册丢失（frp 的 404 页）自动重启 `frpc.exe`，日志见 `watchdog.log`。
 
 ### 方案二：Cloudflare 临时隧道（次选）
 
@@ -114,6 +118,17 @@ node info.mjs                   # 查看访问地址和令牌
 
 ## 🩺 排查
 
+**症状：手机打开域名只看到一页英文**
+`The page you requested was not found ... The server is powered by frp. Faithfully yours, frp.`
+
+这不是网关/令牌的问题，而是 **frps 上这个域名当前没有已注册的代理**：请求到了 frp 服务端，但没找到对应隧道。典型原因是电脑上的 `frpc.exe` 还在运行（任务管理器看得到），但它在服务端的会话已经掉了（挂很久的"僵尸"连接、服务端重启过等），域名映射随之消失——TCP 显示 `Established` 并不代表隧道还有效。
+
+- 一键修复：双击 **`restart-frpc.bat`**（结束旧 frpc → 检查网关 → 重建隧道）。
+- 确认隧道：`frpc.log` 里应有 `login to server success` 与 `start proxy success`。
+- 全链路自检（走公网）：`node scratch/selfcheck-public.mjs`。
+- 两种"打不开"要分清：**frp 的 404 页** = 隧道没注册（重启 frpc）；**502/连不上** = 隧道在，但本机网关 8443 没跑（`start-frp.bat` / `start-gateway.bat`）。
+- 不想每次都手动：`安装自愈守护.bat` 注册每 5 分钟自检，自动修这两类问题。
+
 **症状：手机输入网关令牌后登录成功，页面却只显示一行英文**
 `dsh web authentication required; reopen the URL printed by dsh web.`
 
@@ -124,7 +139,7 @@ node info.mjs                   # 查看访问地址和令牌
 2. 跑一次自检（分别验证页面、接口和 WebSocket 流）：
 
 ```bash
-node scratch/probe-gateway-remote.mjs        # 期望：GET / 为 200 HTML；WS 打开 $events 流能收到 ready
+node scratch/selfcheck-gateway.mjs        # 期望：GET / 为 200 HTML；WS 打开 $events 流能收到 ready
 ```
 
 3. 改完 `gateway.js` 必须重启网关（`start-gateway.bat` 或开机自启脚本），改动不会热加载。

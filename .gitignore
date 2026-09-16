@@ -6,6 +6,12 @@ config.json
 *.log
 gateway.log
 
+# ===== 自愈守护运行时文件 =====
+watchdog.state.json
+watchdog.log*
+frpc.log
+frpc.err
+
 # ===== 下载得到的二进制（不入库，运行脚本会自动下载）=====
 cloudflared.exe
 tailscale-setup.exe
