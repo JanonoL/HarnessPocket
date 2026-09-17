@@ -118,6 +118,15 @@ node info.mjs                   # 查看访问地址和令牌
 
 ## 🩺 排查
 
+**症状：手机点文件无法预览，右侧面板显示「文件资源服务不可用」**
+
+这句提示来自 Harness 客户端：文件地址是 `dsh-resource://file/session/<会话>/<路径>`，而当前页面里**没有注册处理 `file` 协议的「文件资源」provider** —— 是**客户端插件状态掉了**，与隧道、令牌、权限都无关。对照验证：同一台机器上用一个全新浏览器走同一条 FRP 链路、点同一个文件是正常的（`node scratch/cdp-preview-flow.mjs` 可复现这条流程，视口按手机宽度 430px）。
+
+- **立即恢复**：手机上刷新页面（下拉刷新，或把主屏图标关掉再打开）。
+- **自动恢复**：网关注入的 `mobile.js` 会盯着预览区，一旦出现这句提示就自动刷新一次页面 —— 60 秒内不重复刷、最多自动刷 2 次，之后改成一个「点这里重新加载」的浮层按钮，不会陷入刷新循环；输入框里有未发送内容时不刷。
+- **自愈脚本自测**：`node scratch/selfcheck-mobile-heal.mjs`（正常页面不刷、中英文提示各刷一次、刷够后只提示）。
+- **看长连接**：`node scratch/selfcheck-sse.mjs 100` 观察 `/plugins/events` 这条 SSE 在每个链路段上的存活情况。
+
 **症状：手机打开域名只看到一页英文**
 `The page you requested was not found ... The server is powered by frp. Faithfully yours, frp.`
 
