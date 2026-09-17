@@ -6,8 +6,8 @@
 // 用法：node gateway.js   （配合 cloudflared / tailscale / frp 等隧道暴露到公网）
 
 import { createServer } from "node:http";
-import { readFileSync, appendFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { readFileSync, appendFileSync, writeFileSync, statSync } from "node:fs";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, createHash, createHmac } from "node:crypto";
 import { request as httpRequest } from "node:http";
@@ -63,20 +63,40 @@ const MOBILE_CSS = readFileSync(join(__dirname, "mobile.css"), "utf8");
 const MOBILE_JS = readFileSync(join(__dirname, "mobile.js"), "utf8");
 
 // ---------------------------------------------------------------------------
-// 会话存储（内存）：登录成功后签发随机 session id
+// 会话存储：登录成功后签发随机 session id，并落盘，重启网关不用重新输令牌
 // ---------------------------------------------------------------------------
+const SESSION_PATH = join(__dirname, "gateway.sessions.json");
 const sessions = new Map(); // sessionId -> expiresAt
+function loadSessions() {
+  try {
+    const raw = JSON.parse(readFileSync(SESSION_PATH, "utf8"));
+    const now = Date.now();
+    for (const [id, expiresAt] of Object.entries(raw.sessions ?? {})) {
+      if (typeof expiresAt === "number" && expiresAt > now) sessions.set(id, expiresAt);
+    }
+  } catch { /* 首次运行没有该文件 */ }
+}
+function saveSessions() {
+  try {
+    const now = Date.now();
+    const out = {};
+    for (const [id, expiresAt] of sessions) if (expiresAt > now) out[id] = expiresAt;
+    writeFileSync(SESSION_PATH, JSON.stringify({ sessions: out }, null, 2) + "\n");
+  } catch { /* 只读环境忽略 */ }
+}
 function issueSession() {
   const id = randomBytes(24).toString("base64url");
   sessions.set(id, Date.now() + config.sessionTtlMs);
+  saveSessions();
   return id;
 }
 function sessionValid(id) {
   const exp = sessions.get(id);
   if (!exp) return false;
-  if (Date.now() > exp) { sessions.delete(id); return false; }
+  if (Date.now() > exp) { sessions.delete(id); saveSessions(); return false; }
   return true;
 }
+loadSessions();
 const COOKIE_NAME = "harn_gw";
 
 function cookieOf(req) {
@@ -191,6 +211,117 @@ function onDshUnauthorized(statusCode) {
     gwLog("DSH-AUTH 上游返回 401，丢弃缓存，下次请求重新签发");
     dshCookieCache = null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 手机端诊断上报：页面里看不到的客户端报错，回传到 client.log
+// ---------------------------------------------------------------------------
+// 客户端脚本（mobile.js）会 POST 一个 JSON 到这里。放在鉴权之前：页面状态异常时
+// 会话可能已经失效，但诊断信息仍然要能上传。
+const CLIENT_LOG_PATH = join(__dirname, "client.log");
+const clientReportWindows = new Map(); // ip -> { count, windowStart }
+function clientReportLimited(ip) {
+  const now = Date.now();
+  let rec = clientReportWindows.get(ip);
+  if (!rec || now - rec.windowStart > 60_000) {
+    rec = { count: 0, windowStart: now };
+    clientReportWindows.set(ip, rec);
+  }
+  rec.count += 1;
+  return rec.count <= 30; // 每分钟每个 IP 最多 30 条，防止被刷爆
+}
+
+// ---------------------------------------------------------------------------
+// 兜底文件服务：手机端客户端拿不到「文件资源」provider 时，由网关直接读文件返回
+// ---------------------------------------------------------------------------
+// 客户端预览依赖 harness 自己注册的 file provider；个别手机浏览器（如华为 ArkWeb）
+// 上这个 provider 会静默缺失，刷新也修不好。网关自己就是本机进程，可以直接把文件读出来。
+// 只允许读「某个已知会话工作区目录内」的文件，避免变成任意文件读取接口。
+const FILE_MAX_BYTES = 2 * 1024 * 1024;
+let cwdCache = { at: 0, map: new Map() };
+
+// 通过 harness 的 HTTP RPC 问出每个会话的工作区根目录（缓存 60 秒）
+function dshRpc(endpoint, args) {
+  return new Promise((resolve, reject) => {
+    const cookie = dshSessionCookie();
+    const body = JSON.stringify({
+      type: "client-request",
+      rpcId: randomBytes(16).toString("hex"),
+      method: endpoint,
+      payload: { args }
+    });
+    const req = httpRequest({
+      host: TARGET.hostname,
+      port: TARGET.port || 80,
+      path: `/api/${endpoint}`,
+      method: "POST",
+      headers: {
+        host: TARGET.host,
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+        ...(cookie === null ? {} : { cookie: cookie.header })
+      }
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          if (parsed?.result?.ok === true) resolve(parsed.result.value);
+          else reject(new Error(parsed?.result?.error?.message ?? "harness RPC 失败"));
+        } catch (error) { reject(error); }
+      });
+    });
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+async function sessionCwds() {
+  if (Date.now() - cwdCache.at < 60_000) return cwdCache.map;
+  const value = await dshRpc("session/list", { _request: {} });
+  const map = new Map();
+  for (const item of value?.items ?? []) if (typeof item?.sessionId === "string" && typeof item?.cwd === "string") map.set(item.sessionId, item.cwd);
+  cwdCache = { at: Date.now(), map };
+  return map;
+}
+
+function sendJson(res, status, value) {
+  const body = Buffer.from(JSON.stringify(value));
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "content-length": body.length });
+  res.end(body);
+}
+
+// /__gw_file?session=<会话id>&path=<工作区相对路径>  或  ?absolute=<绝对路径>
+async function handleGwFile(res, url) {
+  const sessionId = url.searchParams.get("session") ?? "";
+  const relPath = url.searchParams.get("path") ?? "";
+  const absolute = url.searchParams.get("absolute") ?? "";
+  let filePath;
+  let inside;
+  try {
+    const cwds = await sessionCwds();
+    if (absolute !== "") {
+      filePath = resolve(absolute);
+      inside = [...cwds.values()].some((cwd) => filePath.toLowerCase().startsWith(resolve(cwd).toLowerCase()));
+    } else {
+      const cwd = cwds.get(sessionId);
+      if (cwd === undefined) return sendJson(res, 404, { ok: false, reason: `未知会话 ${sessionId}（可能是新会话，稍后重试）` });
+      filePath = resolve(cwd, relPath);
+      inside = filePath.toLowerCase().startsWith(resolve(cwd).toLowerCase());
+    }
+  } catch (error) {
+    return sendJson(res, 502, { ok: false, reason: `解析路径失败: ${error.message}` });
+  }
+  if (!inside) return sendJson(res, 403, { ok: false, reason: "只允许读取会话工作区内的文件" });
+  let stat;
+  try { stat = statSync(filePath); } catch { return sendJson(res, 404, { ok: false, reason: "文件不存在或无法访问" }); }
+  if (!stat.isFile()) return sendJson(res, 400, { ok: false, reason: "不是普通文件" });
+  if (stat.size > FILE_MAX_BYTES) return sendJson(res, 413, { ok: false, reason: `文件太大（${stat.size} 字节，上限 ${FILE_MAX_BYTES}）` });
+  let buffer;
+  try { buffer = readFileSync(filePath); } catch (error) { return sendJson(res, 500, { ok: false, reason: `读取失败: ${error.message}` }); }
+  if (buffer.includes(0)) return sendJson(res, 415, { ok: false, reason: "二进制文件，兜底预览只支持文本" });
+  sendJson(res, 200, { ok: true, path: filePath, size: buffer.length, truncated: false, text: buffer.toString("utf8") });
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +458,44 @@ function proxyHttp(req, res, bodyBuffer) {
 const server = createServer((req, res) => {
   const url = new URL(req.url, "http://localhost");
   const ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString().split(",")[0].trim();
+
+  // 客户端诊断上报（见 mobile.js）：不要求鉴权，限大小 + 限频
+  if (url.pathname === "/__gw_clientlog" && req.method === "POST") {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (c) => { size += c.length; if (size <= 16 * 1024) chunks.push(c); });
+    req.on("end", () => {
+      if (clientReportLimited(ip) && chunks.length > 0) {
+        const text = Buffer.concat(chunks).toString("utf8").replace(/[\r\n]+/g, " ").slice(0, 8000);
+        try { appendFileSync(CLIENT_LOG_PATH, `${new Date().toISOString()} ${ip} ${text}\n`); } catch {}
+      }
+      res.writeHead(204, { "cache-control": "no-store" });
+      res.end();
+    });
+    return;
+  }
+
+  // 带 ?token=<网关令牌> 访问：直接发会话 Cookie 并跳到干净 URL，手机可以一键登录
+  const queryToken = url.searchParams.get("token");
+  if (req.method === "GET" && queryToken !== null && timingSafeEqual(queryToken, config.token)) {
+    const sid = issueSession();
+    gwLog(`TOKEN-LOGIN ${ip} -> 已发会话并跳转到 ${url.pathname}`);
+    res.writeHead(302, {
+      "Location": url.pathname === "/" || url.pathname === "" ? "/" : url.pathname,
+      "Set-Cookie": `${COOKIE_NAME}=${sid}; HttpOnly; Path=/; Max-Age=${Math.floor(config.sessionTtlMs / 1000)}; SameSite=Lax`
+    });
+    res.end();
+    return;
+  }
+
   const authed = authorized(req, url);
+
+  // 兜底文件服务（客户端 provider 缺失时给页面用，需要网关会话）
+  if (url.pathname === "/__gw_file" && req.method === "GET") {
+    if (!authed) return sendJson(res, 401, { ok: false, reason: "未登录网关" });
+    handleGwFile(res, url).catch((error) => sendJson(res, 500, { ok: false, reason: error.message }));
+    return;
+  }
 
   // 登录
   if (url.pathname === "/__gw_login" && req.method === "POST") {
@@ -363,7 +531,7 @@ const server = createServer((req, res) => {
   // 登出
   if (url.pathname === "/__gw_logout" && req.method === "POST") {
     const sid = cookieOf(req);
-    if (sid) sessions.delete(sid);
+    if (sid) { sessions.delete(sid); saveSessions(); }
     res.writeHead(302, { "Location": "/", "Set-Cookie": `${COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0` });
     res.end();
     return;

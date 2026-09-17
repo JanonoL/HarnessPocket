@@ -120,12 +120,21 @@ node info.mjs                   # 查看访问地址和令牌
 
 **症状：手机点文件无法预览，右侧面板显示「文件资源服务不可用」**
 
-这句提示来自 Harness 客户端：文件地址是 `dsh-resource://file/session/<会话>/<路径>`，而当前页面里**没有注册处理 `file` 协议的「文件资源」provider** —— 是**客户端插件状态掉了**，与隧道、令牌、权限都无关。对照验证：同一台机器上用一个全新浏览器走同一条 FRP 链路、点同一个文件是正常的（`node scratch/cdp-preview-flow.mjs` 可复现这条流程，视口按手机宽度 430px）。
+这句提示来自 Harness 客户端：文件地址是 `dsh-resource://file/session/<会话>/<路径>`，而当前页面里**没有注册处理 `file` 协议的「文件资源」provider** —— 是**客户端插件状态掉了**，与隧道、令牌、权限都无关。已确认的一种触发场景：**华为浏览器（HarmonyOS / ArkWeb 内核）**上该 provider 会**静默缺失**（页面零报错、刷新也不恢复），而同一账号在 Chrome/Edge 上正常。
 
-- **立即恢复**：手机上刷新页面（下拉刷新，或把主屏图标关掉再打开）。
-- **自动恢复**：网关注入的 `mobile.js` 会盯着预览区，一旦出现这句提示就自动刷新一次页面 —— 60 秒内不重复刷、最多自动刷 2 次，之后改成一个「点这里重新加载」的浮层按钮，不会陷入刷新循环；输入框里有未发送内容时不刷。
-- **自愈脚本自测**：`node scratch/selfcheck-mobile-heal.mjs`（正常页面不刷、中英文提示各刷一次、刷够后只提示）。
-- **看长连接**：`node scratch/selfcheck-sse.mjs 100` 观察 `/plugins/events` 这条 SSE 在每个链路段上的存活情况。
+网关注入的 `mobile.js` 现在做三层处理：
+
+1. **网关兜底预览**：发现这句提示且能读到文件地址时，直接让网关读文件（`GET /__gw_file?session=…&path=…`，只允许会话工作区内的文本文件，≤2 MB）并把内容画进预览区，手机上照样能看文件；成功后会在 `client.log` 记一条 `网关兜底预览成功`。
+2. **老内核兜底**：补齐 `Promise.withResolvers`、`AbortSignal.timeout`、`throwIfAborted`、`Object.hasOwn`、`Array/String.prototype.at`。
+3. **诊断上报**：客户端报错、UA、API 探测结果回传到网关 `client.log`（`POST /__gw_clientlog`，限频 30 条/分钟）。手机上看不到 console，靠这个定位。
+
+自测：
+
+```bash
+node scratch/cdp-fallback-check.mjs     # 模拟 provider 缺失 → 兜底预览把内容画回来
+node scratch/selfcheck-mobile-heal.mjs  # 自愈/兜底/老内核补齐 五个场景
+node scratch/selfcheck-sse.mjs 100      # /plugins/events 长连接存活
+```
 
 **症状：手机打开域名只看到一页英文**
 `The page you requested was not found ... The server is powered by frp. Faithfully yours, frp.`

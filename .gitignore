@@ -8,6 +8,8 @@ gateway.log
 
 # ===== 自愈守护运行时文件 =====
 watchdog.state.json
+gateway.sessions.json
+client.log
 watchdog.log*
 frpc.log
 frpc.err

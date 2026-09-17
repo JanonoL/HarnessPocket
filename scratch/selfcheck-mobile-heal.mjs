@@ -20,8 +20,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 用真实 http 源承载测试页（data: URL 的 sessionStorage 是不可用的，会掩盖问题）
 const pages = {
   "/ok": '<div data-textpreview-state="text">文件内容正常</div>',
-  "/broken": '<div data-textpreview-state="loading"><p>文件资源服务不可用。</p></div>',
-  "/broken-en": '<div data-textpreview-state="loading"><p>The file resource service is unavailable.</p></div>'
+  // 真实场景里预览区都带 data-textpreview-url（文件地址），兜底流程依赖它
+  "/broken": '<div data-textpreview-url="dsh-resource://file/session/x/y.md"><div data-textpreview-state="loading"><p>文件资源服务不可用。</p></div></div>',
+  "/broken-en": '<div data-textpreview-url="dsh-resource://file/session/x/y.md"><div data-textpreview-state="loading"><p>The file resource service is unavailable.</p></div></div>',
+  // 没有地址时（异常形态）只提示、不刷新
+  "/broken-noaddr": '<div data-textpreview-state="loading"><p>文件资源服务不可用。</p></div>',
+  // 模拟老内核：先删掉这些新 API，再看注入脚本能否补回来
+  "/polyfill": '<script>try{delete Promise.withResolvers;delete Object.hasOwn;delete AbortSignal.timeout;delete AbortSignal.prototype.throwIfAborted;delete Array.prototype.at;delete String.prototype.at;}catch(e){}</script><i id="probe" style="display:none">' + "</i>"
 };
 const server = createServer((req, res) => {
   const body = pages[req.url.split("?")[0]] ?? "<div>?</div>";
@@ -75,8 +80,9 @@ async function scenario(label, path, waitMs) {
 }
 
 const ok = await scenario("正常页面", "/ok", 5000);
-const zh = await scenario("中文不可用提示", "/broken", 6000);
-const en = await scenario("英文不可用提示", "/broken-en", 6000);
+const zh = await scenario("中文提示（有地址）", "/broken", 7000);
+const en = await scenario("英文提示（有地址）", "/broken-en", 7000);
+const noAddr = await scenario("没有地址（异常形态）", "/broken-noaddr", 6000);
 
 // 场景三：已经自动刷过两次 → 只提示，不再刷新
 navigations.length = 0;
@@ -88,6 +94,19 @@ const capped = await ev(`!!document.querySelector('[data-harn-gw-hint]')`);
 const cappedNavigations = navigations.filter((u) => u.includes("/broken")).length - 1;
 console.log(`[刷够两次后] 自动刷新=${cappedNavigations} 提示按钮=${capped}`);
 
-console.log(`\n结论：正常页面不刷新=${ok.reloads === 0 && !ok.hint}；中/英文提示各自动刷新一次=${zh.reloads === 1 && en.reloads === 1}；刷够后只提示=${cappedNavigations === 0 && capped === true}`);
+// 场景四：老内核兜底（先删掉这些 API，注入脚本应补齐）
+await S("Page.navigate", { url: `http://127.0.0.1:${PAGE_PORT}/polyfill` });
+await sleep(1500);
+const polyfilled = await ev(`JSON.stringify({
+  promiseWithResolvers: typeof Promise.withResolvers,
+  objectHasOwn: typeof Object.hasOwn,
+  abortSignalTimeout: typeof AbortSignal.timeout,
+  throwIfAborted: typeof AbortSignal.prototype.throwIfAborted,
+  arrayAt: typeof Array.prototype.at,
+  stringAt: typeof String.prototype.at
+})`);
+console.log(`[老内核兜底] ${polyfilled}`);
+
+console.log(`\n结论：正常页面不刷新=${ok.reloads === 0 && !ok.hint}；提示（有地址，兜底失败后）自动刷新一次=${zh.reloads === 1 && en.reloads === 1}；没有地址时只提示不刷新=${noAddr.reloads === 0 && noAddr.hint === true}；刷够后只提示=${cappedNavigations === 0 && capped === true}；兜底补齐=${!/"undefined"/.test(polyfilled)}`);
 ws.close(); child.kill(); server.close(); await sleep(400);
 try { rmSync(profile, { recursive: true, force: true }); } catch {}
