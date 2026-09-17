@@ -195,6 +195,7 @@
 
   // ---- 兜底预览：把文件地址交给网关读，网关读回文本后画进预览区 ----
   var lastRendered = "";
+  var dismissedKey = "";   // 用户手动关掉兜底浮层后，不要在同一条提示上反复弹出
 
   // 点文件时把文件行上的绝对路径记下来：provider 缺失时预览区只剩一句提示，
   // 拿不到 data-textpreview-url，只能靠点击那一刻从文件树行上取（LI[data-files-path]）。
@@ -248,30 +249,32 @@
     }
     lastRendered = "";
   }
-  // 组装兜底视图外壳（文本和图片共用）
+  // 组装兜底视图：用整屏浮层，避免被原界面里高度为 0 / 溢出不显示 的容器裁掉
   function fallbackShell(pane, filePath, note) {
     var oldBox = document.querySelector("[data-harn-gw-preview]");
     if (oldBox) oldBox.remove();
-    var hidden = document.querySelectorAll("[data-harn-gw-hidden-pane]");
-    for (var i = 0; i < hidden.length; i++) {
-      hidden[i].style.display = "";
-      hidden[i].removeAttribute("data-harn-gw-hidden-pane");
-    }
     var box = document.createElement("div");
     box.setAttribute("data-harn-gw-preview", "");
-    box.style.cssText = "flex:1 1 auto;min-height:0;overflow:auto;padding:10px 14px;"
-      + "font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:inherit;background:inherit";
-    var head = document.createElement("div");
-    head.textContent = filePath + "（网关兜底预览" + note + "）";
-    head.style.cssText = "opacity:.55;margin-bottom:8px;white-space:pre-wrap;word-break:break-all";
-    box.appendChild(head);
-    if (pane !== null) {
-      pane.setAttribute("data-harn-gw-hidden-pane", "");
-      pane.style.display = "none";
-      (pane.parentElement || document.body).appendChild(box);
-    } else {
-      document.body.appendChild(box);
-    }
+    box.style.cssText = "position:fixed;inset:0;z-index:2147483600;background:#0d0f17;color:#e6e8f0;"
+      + "overflow:auto;-webkit-overflow-scrolling:touch;padding:10px 12px 28px;box-sizing:border-box;"
+      + "font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
+    var bar = document.createElement("div");
+    bar.style.cssText = "display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;position:sticky;top:0;"
+      + "background:#0d0f17;padding:4px 0 8px";
+    var title = document.createElement("div");
+    title.textContent = filePath + "（网关兜底预览" + (note || "") + "）";
+    title.style.cssText = "flex:1 1 auto;opacity:.65;word-break:break-all;font-size:12px";
+    var close = document.createElement("button");
+    close.textContent = "✕ 关闭";
+    close.style.cssText = "flex:none;background:#262b3d;color:#e6e8f0;border:0;border-radius:8px;padding:6px 10px;font-size:12px";
+    close.addEventListener("click", function () {
+      dismissedKey = lastRendered;
+      clearFallback(true);
+    });
+    bar.appendChild(title);
+    bar.appendChild(close);
+    box.appendChild(bar);
+    document.body.appendChild(box);
     return box;
   }
   function renderFallback(pane, filePath, text, truncated) {
@@ -289,11 +292,18 @@
       node = document.createElement("img");
       node.src = raw;
       node.alt = filePath;
-      node.style.cssText = "max-width:100%;height:auto;display:block;background:#fff0";
+      node.style.cssText = "max-width:100%;height:auto;display:block;margin:0 auto";
+      node.addEventListener("error", function () {
+        diagPush("fallback", "图片加载失败（raw 请求没成功，可能是网关会话失效）: " + raw);
+        if (typeof diagReport === "function") diagReport("fallback-failed");
+      });
+      node.addEventListener("load", function () {
+        diagPush("fallback", "图片已渲染: " + node.naturalWidth + "x" + node.naturalHeight);
+      });
     } else {
       node = document.createElement("iframe");
       node.src = raw;
-      node.style.cssText = "width:100%;height:70vh;border:0;background:#fff";
+      node.style.cssText = "width:100%;height:75vh;border:0;background:#fff";
     }
     box.appendChild(node);
   }
@@ -366,6 +376,7 @@
       if (guess === "") { showHint(); return; }
       key = "abs:" + guess;
     }
+    if (key === dismissedKey) return;
     if (key === lastRendered) return;
     lastRendered = key;
     loadFallback(address).then(function (ok) {
