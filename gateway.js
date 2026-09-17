@@ -238,6 +238,13 @@ function clientReportLimited(ip) {
 // 上这个 provider 会静默缺失，刷新也修不好。网关自己就是本机进程，可以直接把文件读出来。
 // 只允许读「某个已知会话工作区目录内」的文件，避免变成任意文件读取接口。
 const FILE_MAX_BYTES = 2 * 1024 * 1024;
+const RAW_MAX_BYTES = 20 * 1024 * 1024;
+// 可以直接以原始字节回给浏览器的类型（图片、PDF：客户端预览器缺失时由浏览器自己渲染）
+const RAW_MIME = {
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+  ".webp": "image/webp", ".bmp": "image/bmp", ".ico": "image/x-icon", ".avif": "image/avif",
+  ".svg": "image/svg+xml", ".pdf": "application/pdf"
+};
 let cwdCache = { at: 0, map: new Map() };
 
 // 通过 harness 的 HTTP RPC 问出每个会话的工作区根目录（缓存 60 秒）
@@ -317,11 +324,36 @@ async function handleGwFile(res, url) {
   let stat;
   try { stat = statSync(filePath); } catch { return sendJson(res, 404, { ok: false, reason: "文件不存在或无法访问" }); }
   if (!stat.isFile()) return sendJson(res, 400, { ok: false, reason: "不是普通文件" });
+
+  const ext = (filePath.match(/\.[A-Za-z0-9]+$/)?.[0] ?? "").toLowerCase();
+  const mime = RAW_MIME[ext];
+  const rawUrl = () => {
+    const query = absolute !== ""
+      ? `absolute=${encodeURIComponent(absolute)}`
+      : `session=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(relPath)}`;
+    return `/__gw_file?${query}&raw=1`;
+  };
+
+  // raw=1：直接把字节回给浏览器（图片/PDF 由浏览器自己渲染）
+  if (url.searchParams.get("raw") === "1") {
+    if (mime === undefined) return sendJson(res, 415, { ok: false, reason: `不支持直接回传的文件类型 ${ext}` });
+    if (stat.size > RAW_MAX_BYTES) return sendJson(res, 413, { ok: false, reason: `文件太大（${stat.size} 字节）` });
+    let raw;
+    try { raw = readFileSync(filePath); } catch (error) { return sendJson(res, 500, { ok: false, reason: `读取失败: ${error.message}` }); }
+    res.writeHead(200, { "content-type": mime, "cache-control": "no-store", "content-length": raw.length });
+    res.end(raw);
+    return;
+  }
+
+  // 图片/PDF：不给文本，只告诉页面去哪儿取原始字节
+  if (mime !== undefined) {
+    return sendJson(res, 200, { ok: true, mode: "binary", mime, raw: rawUrl(), path: filePath, size: stat.size });
+  }
   if (stat.size > FILE_MAX_BYTES) return sendJson(res, 413, { ok: false, reason: `文件太大（${stat.size} 字节，上限 ${FILE_MAX_BYTES}）` });
   let buffer;
   try { buffer = readFileSync(filePath); } catch (error) { return sendJson(res, 500, { ok: false, reason: `读取失败: ${error.message}` }); }
-  if (buffer.includes(0)) return sendJson(res, 415, { ok: false, reason: "二进制文件，兜底预览只支持文本" });
-  sendJson(res, 200, { ok: true, path: filePath, size: buffer.length, truncated: false, text: buffer.toString("utf8") });
+  if (buffer.includes(0)) return sendJson(res, 415, { ok: false, reason: "二进制文件，兜底预览只支持文本和图片" });
+  sendJson(res, 200, { ok: true, mode: "text", path: filePath, size: buffer.length, truncated: false, text: buffer.toString("utf8") });
 }
 
 // ---------------------------------------------------------------------------

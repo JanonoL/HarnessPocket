@@ -124,7 +124,7 @@ node info.mjs                   # 查看访问地址和令牌
 
 网关注入的 `mobile.js` 现在做三层处理：
 
-1. **网关兜底预览**：发现这句提示且能读到文件地址时，直接让网关读文件（`GET /__gw_file?session=…&path=…`，只允许会话工作区内的文本文件，≤2 MB）并把内容画进预览区，手机上照样能看文件；成功后会在 `client.log` 记一条 `网关兜底预览成功`。
+1. **网关兜底预览**：发现这句提示后，网关直接读文件并把内容画进预览区 —— 文本走 JSON（≤2 MB），图片/PDF 走 `raw=1` 由浏览器自己渲染（≤20 MB）；路径线索依次是预览区的 `data-textpreview-url`、**点击文件行时记下的 `data-files-path`**、面板目录 + 标题相对路径。只允许会话工作区内的文件，拒绝 `../` 穿越。成功后 `client.log` 记一条 `网关兜底预览成功`。
 2. **老内核兜底**：补齐 `Promise.withResolvers`、`AbortSignal.timeout`、`throwIfAborted`、`Object.hasOwn`、`Array/String.prototype.at`。
 3. **诊断上报**：客户端报错、UA、API 探测结果回传到网关 `client.log`（`POST /__gw_clientlog`，限频 30 条/分钟）。手机上看不到 console，靠这个定位。
 
