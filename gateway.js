@@ -6,7 +6,7 @@
 // 用法：node gateway.js   （配合 cloudflared / tailscale / frp 等隧道暴露到公网）
 
 import { createServer } from "node:http";
-import { readFileSync, appendFileSync, writeFileSync, statSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync, statSync, createReadStream } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, createHash, createHmac } from "node:crypto";
@@ -239,11 +239,18 @@ function clientReportLimited(ip) {
 // 只允许读「某个已知会话工作区目录内」的文件，避免变成任意文件读取接口。
 const FILE_MAX_BYTES = 2 * 1024 * 1024;
 const RAW_MAX_BYTES = 20 * 1024 * 1024;
-// 可以直接以原始字节回给浏览器的类型（图片、PDF：客户端预览器缺失时由浏览器自己渲染）
+// 视频/音频：harness 客户端根本没有视频预览器（选中后只会说「该格式文件暂时无法预览」），
+// 只能由网关把字节喂给浏览器的 <video>。体积上限放大，并且走流式 + Range。
+const MEDIA_MAX_BYTES = 512 * 1024 * 1024;
+// 可以直接以原始字节回给浏览器的类型（客户端预览器缺失时由浏览器自己渲染）
 const RAW_MIME = {
   ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
   ".webp": "image/webp", ".bmp": "image/bmp", ".ico": "image/x-icon", ".avif": "image/avif",
-  ".svg": "image/svg+xml", ".pdf": "application/pdf"
+  ".svg": "image/svg+xml", ".pdf": "application/pdf",
+  ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+  ".ogv": "video/ogg", ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
+  ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".wav": "audio/wav", ".ogg": "audio/ogg",
+  ".oga": "audio/ogg", ".flac": "audio/flac", ".aac": "audio/aac"
 };
 let cwdCache = { at: 0, map: new Map() };
 
@@ -299,8 +306,68 @@ function sendJson(res, status, value) {
   res.end(body);
 }
 
+// 解析 Range 头：{ start, end } / null（没有范围，整文件）/ "unsatisfiable"（范围越界）。
+function parseByteRange(header, size) {
+  if (typeof header !== "string" || header.trim() === "") return null;
+  const m = /^bytes=(\d*)-(\d*)$/u.exec(header.trim());
+  if (m === null) return null;   // 不认识的写法：按整文件回，浏览器自己会处理
+  const [, rawStart, rawEnd] = m;
+  let start;
+  let end;
+  if (rawStart === "") {
+    const suffix = Number(rawEnd);
+    if (!Number.isFinite(suffix) || suffix <= 0) return "unsatisfiable";
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(rawStart);
+    end = rawEnd === "" ? size - 1 : Number(rawEnd);
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) return "unsatisfiable";
+  return { start, end: Math.min(end, size - 1) };
+}
+
+// 原始字节通道：流式发送（不整块读进内存），支持 Range/206 —— 视频拖动进度条、分段请求都靠它。
+function serveRaw(req, res, filePath, mime, size) {
+  const range = parseByteRange(req.headers.range, size);
+  if (range === "unsatisfiable") {
+    res.writeHead(416, {
+      "content-type": "text/plain; charset=utf-8",
+      "content-range": `bytes */${size}`,
+      "accept-ranges": "bytes",
+      "cache-control": "no-store"
+    });
+    res.end();
+    return;
+  }
+  const headers = {
+    "content-type": mime,
+    "cache-control": "no-store",
+    "accept-ranges": "bytes"
+  };
+  if (range === null) {
+    headers["content-length"] = size;
+    res.writeHead(200, headers);
+    if (req.method === "HEAD") { res.end(); return; }
+    streamRange(res, filePath, undefined, undefined);
+    return;
+  }
+  headers["content-length"] = range.end - range.start + 1;
+  headers["content-range"] = `bytes ${range.start}-${range.end}/${size}`;
+  res.writeHead(206, headers);
+  if (req.method === "HEAD") { res.end(); return; }
+  streamRange(res, filePath, range.start, range.end);
+}
+
+function streamRange(res, filePath, start, end) {
+  const stream = start === undefined ? createReadStream(filePath) : createReadStream(filePath, { start, end });
+  stream.on("error", () => { try { res.destroy(); } catch {} });
+  res.on("close", () => stream.destroy());
+  stream.pipe(res);
+}
+
 // /__gw_file?session=<会话id>&path=<工作区相对路径>  或  ?absolute=<绝对路径>
-async function handleGwFile(res, url) {
+async function handleGwFile(req, res, url) {
   const sessionId = url.searchParams.get("session") ?? "";
   const relPath = url.searchParams.get("path") ?? "";
   const absolute = url.searchParams.get("absolute") ?? "";
@@ -334,15 +401,13 @@ async function handleGwFile(res, url) {
     return `/__gw_file?${query}&raw=1`;
   };
 
-  // raw=1：直接把字节回给浏览器（图片/PDF 由浏览器自己渲染）
+  // raw=1：直接把字节回给浏览器（图片/PDF/视频由浏览器自己渲染）
   if (url.searchParams.get("raw") === "1") {
     if (mime === undefined) return sendJson(res, 415, { ok: false, reason: `不支持直接回传的文件类型 ${ext}` });
-    if (stat.size > RAW_MAX_BYTES) return sendJson(res, 413, { ok: false, reason: `文件太大（${stat.size} 字节）` });
-    let raw;
-    try { raw = readFileSync(filePath); } catch (error) { return sendJson(res, 500, { ok: false, reason: `读取失败: ${error.message}` }); }
-    res.writeHead(200, { "content-type": mime, "cache-control": "no-store", "content-length": raw.length });
-    res.end(raw);
-    return;
+    const isMedia = mime.startsWith("video/") || mime.startsWith("audio/");
+    const limit = isMedia ? MEDIA_MAX_BYTES : RAW_MAX_BYTES;
+    if (stat.size > limit) return sendJson(res, 413, { ok: false, reason: `文件太大（${stat.size} 字节，上限 ${limit}）` });
+    return serveRaw(req, res, filePath, mime, stat.size);
   }
 
   // 图片/PDF：不给文本，只告诉页面去哪儿取原始字节
@@ -405,14 +470,30 @@ function loginPageHtml(error) {
 }
 
 // ---------------------------------------------------------------------------
-// HTML 注入：在 </head> 前插入移动端 CSS/JS
+// HTML 注入：JS 必须尽早（见下），CSS 放在 </head> 前
 // ---------------------------------------------------------------------------
 function injectMobile(html) {
   if (process.env.HARNESS_GW_NO_INJECT === "1") return html;
-  const tag = `<style data-harn-gw>${MOBILE_CSS}</style><script data-harn-gw>${MOBILE_JS}</script>`;
-  if (html.includes("</head>")) return html.replace("</head>", tag + "</head>");
-  if (html.includes("</HEAD>")) return html.replace("</HEAD>", tag + "</HEAD>");
-  return tag + html;
+  const cssTag = `<style data-harn-gw>${MOBILE_CSS}</style>`;
+  const jsTag = `<script data-harn-gw>${MOBILE_JS}</script>`;
+  let out = html;
+  // JS 注入点必须在 harness 自己的脚本之前：它的引导脚本（window.__ModuleLoader__）就在 <head> 开头，
+  // 客户端的插件模块包装、几处新 API、以及 dsh-resource:// 地址的 URL 解析都在那之后立刻发生。
+  // 注入到 </head> 前会太晚——API 补齐赶不上、插件加载探针一个 load() 都抓不到。
+  // 页面用的是 HTTP 头的 charset（head 里没有 <meta charset>），所以前置注入不会有编码问题。
+  const headOpen = /<head[^>]*>/iu.exec(out);
+  if (headOpen !== null) {
+    let at = headOpen.index + headOpen[0].length;
+    // 若 head 里紧跟 <meta charset>，插到它后面：别把 charset 声明挤出前 1024 字节（HTTP 头已带 charset，这里是双保险）
+    const metaCharset = /<meta[^>]*charset[^>]*>/iu.exec(out.slice(at, at + 1024));
+    if (metaCharset !== null) at += metaCharset.index + metaCharset[0].length;
+    out = out.slice(0, at) + jsTag + out.slice(at);
+  } else {
+    out = jsTag + out;
+  }
+  if (out.includes("</head>")) return out.replace("</head>", cssTag + "</head>");
+  if (out.includes("</HEAD>")) return out.replace("</HEAD>", cssTag + "</HEAD>");
+  return out + cssTag;
 }
 
 // ---------------------------------------------------------------------------
@@ -467,6 +548,8 @@ function proxyHttp(req, res, bodyBuffer) {
       delete outHeaders["content-length"];
       delete outHeaders["transfer-encoding"];
       outHeaders["content-length"] = body.length;
+      // 注入过脚本的 HTML 不许缓存：否则改了 mobile.js，手机刷新还是旧脚本（页面本身是动态生成的，没有缓存价值）
+      if (isHtml) outHeaders["cache-control"] = "no-store";
       res.writeHead(proxyRes.statusCode || 200, outHeaders);
       res.end(body);
     });
@@ -523,9 +606,9 @@ const server = createServer((req, res) => {
   const authed = authorized(req, url);
 
   // 兜底文件服务（客户端 provider 缺失时给页面用，需要网关会话）
-  if (url.pathname === "/__gw_file" && req.method === "GET") {
+  if (url.pathname === "/__gw_file" && (req.method === "GET" || req.method === "HEAD")) {
     if (!authed) return sendJson(res, 401, { ok: false, reason: "未登录网关" });
-    handleGwFile(res, url).catch((error) => sendJson(res, 500, { ok: false, reason: error.message }));
+    handleGwFile(req, res, url).catch((error) => sendJson(res, 500, { ok: false, reason: error.message }));
     return;
   }
 

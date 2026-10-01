@@ -118,23 +118,78 @@ node info.mjs                   # 查看访问地址和令牌
 
 ## 🩺 排查
 
-**症状：手机点文件无法预览，右侧面板显示「文件资源服务不可用」**
+**症状：手机点文件无法预览，右侧面板显示「文件资源服务不可用」（图片则是一片空白）**
 
-这句提示来自 Harness 客户端：文件地址是 `dsh-resource://file/session/<会话>/<路径>`，而当前页面里**没有注册处理 `file` 协议的「文件资源」provider** —— 是**客户端插件状态掉了**，与隧道、令牌、权限都无关。已确认的一种触发场景：**华为浏览器（HarmonyOS / ArkWeb 内核）**上该 provider 会**静默缺失**（页面零报错、刷新也不恢复），而同一账号在 Chrome/Edge 上正常。
+**根因（已定位并修复）**：不是插件坏了，是**手机内核的 URL 解析**。文件地址形如 `dsh-resource://file/session/<会话>/<路径>`，Harness 客户端靠它的 hostname 找 provider：
 
-网关注入的 `mobile.js` 现在做三层处理：
+```js
+// dsh-client-resources/lib/client.js
+const parsed = new URL(address);
+if (parsed.protocol !== `dsh-resource:`) return void 0;
+return parsed.hostname === "" ? void 0 : parsed.hostname.toLowerCase();   // ← 就是这里
+```
 
-1. **网关兜底预览**：发现这句提示后，网关直接读文件并把内容画进预览区 —— 文本走 JSON（≤2 MB），图片/PDF 走 `raw=1` 由浏览器自己渲染（≤20 MB），内容显示在一个**整屏浮层**里（右上角「✕ 关闭」，避免被原界面的零高度容器裁掉）。路径线索依次是预览区的 `data-textpreview-url`、**点击文件行时记下的 `data-files-path`**、面板目录 + 标题相对路径。只允许会话工作区内的文件，拒绝 `../` 穿越。成功后 `client.log` 记一条 `网关兜底预览成功`。
+| 环境 | `new URL("dsh-resource://file/session/s1/a/b.txt")` |
+| --- | --- |
+| 正统 Chromium（桌面 Chrome/Edge） | `hostname=file`，`pathname=/session/s1/a/b.txt` |
+| 华为浏览器 ArkWeb（HarmonyOS） | `hostname=`（空），`pathname=//file/session/s1/a/b.txt` |
+
+ArkWeb 对**自定义 scheme 不解析 authority**，于是 hostname 为空 → `protocolOf()` 返回 `undefined` → 找不到 `file` provider → 文本/图片/PDF 预览全部变成「文件资源服务不可用」（图片更是整块空白，连提示都没有），刷新也不会好。这也是为什么"更新 dsh"没用：插件本身一直是加载并 apply 的（`client.log` 的探针可见 `loaded=58 applied=57`），坏的是地址到 provider 的那一步映射。
+
+网关注入的 `mobile.js` 现在做五层处理：
+
+0. **URL 解析补齐（根因修复）**：检测到内核把 `dsh-resource://` 的 host 解析成空时，接管 `URL.prototype` 的 `host` / `hostname` / `pathname` 三个取值，从 `href` 里把 authority 切回来（内核正常时**完全不介入**）。修复后原生预览恢复：Markdown/代码/图片/PDF/Office 都回到 harness 自己的预览器，还能跟随文件变化自动刷新。验证：
+
+   ```bash
+   node scratch/cdp-arkweb-url-shim.mjs   # 用 CDP 模拟 ArkWeb 缺陷 → 对照组必须坏，注入后必须好
+   ```
+   实测：对照组 `hostname=`+`pathname=//file/...`（与手机上报的原样一致），注入后 `hostname=file`，点开真实 Markdown 文件后预览区 `state=text`、渲染器 `…/documentpreview/markdown`、正文 4135 字符、无「文件资源服务不可用」。
+1. **网关兜底预览**（根因修复失效时的保险，也是**视频唯一的看法**）：原生预览给不出内容时，网关直接读文件并画进一个**整屏浮层**（右上角「✕ 关闭」，避免被原界面的零高度容器裁掉）。三类文件三种画法：
+
+   | 类型 | 上限 | 画法 |
+   | --- | --- | --- |
+   | 文本 / 代码 / Markdown | 2 MB | JSON 文本，`<pre>` 渲染 |
+   | 图片 / PDF | 20 MB | `raw=1` 原始字节，`<img>` / `<iframe>` 交给浏览器 |
+   | 视频 / 音频 | 512 MB | `raw=1` **流式 + Range（206）**，`<video controls>` 播放、可拖进度条 |
+
+   触发条件（任一命中即兜底）：
+   - **harness 自己挂的失败标记**：预览区里出现 `data-textpreview-unsupported`（该类型没有预览器，**视频就是这一类**）、`data-textpreview-failed` / `data-textpreview-meta-failed`（读取或元数据失败）。
+   - **状态区文案**：`文件资源服务不可用`、`预览器 X 不可用`、`文件不存在`、`读取失败：`（中英文都认）。**只扫状态区、不扫文件正文**——否则一份正文里正好写着这些词的文件（比如本项目的 README）会把自己误判成故障、白弹一个浮层。
+   - **空白渲染器**：预览区已经选中了渲染器（`data-document-preview`）却整块空白、连提示文案都没有。这是 **provider 找不到时图片/PDF 的真实形态**，也是"看不到图片"的原因；为避免误伤加载慢的大图，连续空白 2.5 秒才判定，且兜底后 8 秒内若原生渲染自己画出来了，浮层会自动收起。
+
+   路径线索依次是预览区的 `data-textpreview-url`、**点击文件行时记下的 `data-files-path`**、面板目录 + 标题相对路径。只允许会话工作区内的文件，拒绝 `../` 穿越。成功后 `client.log` 记一条 `网关兜底预览成功`。
+
+   > **视频为什么必须走兜底**：Harness 客户端**根本没有视频预览器**（`dsh-client-ui-sidebar-documentpreview` 只注册了 Office/表格/Markdown/代码/图片/PDF/HTML/纯文本），所以任何浏览器上点 `.mp4` 都只会显示「该格式文件暂时无法预览」。现在这条兜底把视频交给浏览器原生播放器，桌面端走网关访问时同样有效。
+   >
+   > **播放器怎么用**：手机浏览器一律**禁止「有声自动播放」**，所以兜底播放器**先静音自动播放**把画面放出来（这才是"能不能看"的关键），要声音点浮层里的「🔊 开启声音」，还有「⛶ 全屏」。状态行实时显示 `正在加载… / 已就绪 30s 640x480 / ▶ 正在播放 / 播放失败 code=X`；**只有真的失败**（或不支持该编码）才把直链摆出来，长按可用系统播放器打开。另外补了 `x5-playsinline` / `x5-video-player-type=h5`，避免被部分国产内核劫持到它自己的全屏播放器里（那种情况经常只剩黑屏）。
+   >
+   > 视频能播的前提是**网关的 Range 支持**：很多 mp4（例如本机 ffmpeg 默认输出）`moov` 在文件尾部，浏览器必须能取到那一段才能起播。已验证公网链路（HTTPS + FRP）同样返回 `206 + Content-Range`。
 2. **老内核兜底**：补齐 `Promise.withResolvers`、`AbortSignal.timeout`、`throwIfAborted`、`Object.hasOwn`、`Array/String.prototype.at`。
-3. **诊断上报**：客户端报错、UA、API 探测结果回传到网关 `client.log`（`POST /__gw_clientlog`，限频 30 条/分钟）。手机上看不到 console，靠这个定位。
+3. **客户端插件探针**：Harness 的客户端插件以内联模块注册（`window.__ModuleLoader__.load({ id, factory })`），工厂抛错、或插件的 `apply` 因为依赖服务没就绪而压根没被调用时，**页面不会有任何报错**，只表现为某个 provider 静默缺失。注入脚本会包裹这个加载器，把 `loaded` / `applied` / `issues` 以及**关键插件名单**随诊断上报，例如：
+
+   ```text
+   plugins = loaded=58 applied=57 key=[client-modules,api-workspace-files,client-resources,client-ui-sidebar-documentpreview]
+   ```
+4. **诊断上报**：客户端报错、UA、API 探测结果回传网关 `client.log`（`POST /__gw_clientlog`，限频 30 条/分钟）。除原有探针外还上报：`urlProbe`（内核怎么解析 `dsh-resource://` 地址 —— provider 就是按它的 hostname 找的）、`docPreview`（预览区渲染器与 body 状态）、`gwMedia`（兜底浮层里媒体加载结果）、`plugins`（插件探针）。手机上看不到 console，靠这个定位。
+
+> ⚠️ **注入顺序很重要**：`gateway.js` 把 `mobile.js` 注入在 `<head>` 的**最前面**（harness 的引导脚本 `window.__ModuleLoader__` 就在 `<head>` 开头，偏移约 200 字节）。以前注入在 `</head>` 前（约 34 KB 处），等于在应用代码之后才执行 —— 老内核 API 补齐赶不上、插件探针一个 `load()` 都抓不到、URL 解析补齐也会来不及。
 
 自测：
 
 ```bash
-node scratch/cdp-fallback-check.mjs     # 模拟 provider 缺失 → 兜底预览把内容画回来
+node scratch/cdp-phone-acceptance.mjs   # 手机验收：模拟 ArkWeb 缺陷下真点 文本/图片/视频，三项都必须能看
+node scratch/cdp-arkweb-url-shim.mjs    # 根因链路：模拟 ArkWeb 解析缺陷 → 原生预览恢复
+node scratch/cdp-media-fallback.mjs     # 视频兜底（<video> 播放 + 拖动）+ 图片空白面板兜底 + Range(206)
+node scratch/cdp-video-play-check.mjs "F:\\path\\video.mp4"   # 指定视频走网关能不能真起播（含 moov 在尾部的 mp4）
+node scratch/cdp-fallback-check.mjs     # 模拟 provider 缺失 → 兜底预览把文本和图片画回来
 node scratch/selfcheck-mobile-heal.mjs  # 自愈/兜底/老内核补齐 五个场景
 node scratch/selfcheck-sse.mjs 100      # /plugins/events 长连接存活
 ```
+
+> `cdp-phone-acceptance.mjs` / `cdp-media-fallback.mjs` 需要 `scratch/gw-test.png`（200x120）和 `scratch/gw-test.mp4`（3 秒）两个素材；
+> 验收脚本会自己把它们临时布点到「界面可能打开的那些会话工作区」里，跑完自动删除，不会留残留。
+
+> ⚠️ `mobile.js` / `mobile.css` 和 `gateway.js` 一样，**只在网关启动时读一次**，改完必须重启网关（`start-gateway.bat` 或 `start-gateway-hidden.vbs`）。
 
 **症状：手机打开域名只看到一页英文**
 `The page you requested was not found ... The server is powered by frp. Faithfully yours, frp.`
