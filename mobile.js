@@ -302,21 +302,39 @@
   diagReport("boot");
   setTimeout(function () { diagReport("boot+8s"); }, 8000);
 
-  function collapseSidebar() {
-    var root = document.querySelector(".hHd-Xa_root");
-    if (root && !root.classList.contains("hHd-Xa_collapsed")) {
-      var toggle = document.querySelector(".hHd-Xa_toggle");
-      if (toggle) toggle.click();
-    }
+  // ---- 侧边栏（手机上是抽屉）----
+  // harness 0.2.2 起，开合状态放在 sidebarCol 的位置上（关闭时整块移到屏幕左侧外 → rect.right ≈ 0），
+  // 并且**不再有 hHd-Xa_collapsed 这个类**。旧实现靠那个类判断，类消失后守卫就永远不生效：
+  // 任何一次侧边栏外的点击都会去点 toggle —— 关着时被点成"打开"，
+  // 表现就是"想在会话里打字，一点输入框侧边栏就弹出来挡住视线"。
+  // 现在：只在抽屉确实打开时、点抽屉外才收起；关着时绝不碰 toggle；非抽屉模式（桌面/平板）完全不介入。
+  // 断点取自 harness 自身：<800px 才是抽屉，800-1000px 是 56px 图标栏，≥1024px 展开。
+  function drawerMode() { return window.innerWidth < 800; }
+  function drawerOpen() {
+    if (!drawerMode()) return false;
+    var col = document.querySelector(".pI_x6G_sidebarCol");
+    if (!col) return false;
+    var rect = col.getBoundingClientRect();
+    return rect.width > 0 && rect.right > 8;
   }
   document.addEventListener("click", function (e) {
-    var sidebar = document.querySelector(".pI_x6G_sidebarCol");
-    if (!sidebar) return;
-    // 只有抽屉展开时（root 非 collapsed）才处理
-    var root = document.querySelector(".hHd-Xa_root");
-    if (!root || root.classList.contains("hHd-Xa_collapsed")) return;
-    if (sidebar.contains(e.target)) return; // 点击侧边栏内部不收起
-    collapseSidebar();
+    if (!drawerOpen()) return;                        // 关着：什么都不做（这就是原来的 bug 点）
+    var col = document.querySelector(".pI_x6G_sidebarCol");
+    if (col !== null && col.contains(e.target)) return;   // 点在抽屉内部，交给 harness
+    var toggle = document.querySelector(".hHd-Xa_toggle");
+    if (toggle !== null && toggle.contains(e.target)) return;   // 点在开关上，它自己会处理
+    // 点抽屉外（遮罩）→ 收起。用什么手段是实测出来的：
+    //   · 在捕获阶段里嵌套点 toggle：会被吞（重渲染/状态竞争），不生效；
+    //   · 延后一个任务再点 toggle：在遮罩点击之后依然不生效；
+    //   · Escape：稳定生效，而且本来就是"收起浮层"的语义键（harness 自己监听）。
+    setTimeout(function () {
+      if (!drawerOpen()) return;
+      try {
+        var evt = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, cancelable: true };
+        document.dispatchEvent(new KeyboardEvent("keydown", evt));
+        window.dispatchEvent(new KeyboardEvent("keydown", evt));
+      } catch (error) { /* 老内核不支持 KeyboardEvent 构造就放弃这次收起 */ }
+    }, 0);
   }, true);
 
   // ---- 文件预览自愈 ----

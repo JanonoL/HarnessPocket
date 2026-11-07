@@ -182,6 +182,7 @@ node scratch/cdp-arkweb-url-shim.mjs    # 根因链路：模拟 ArkWeb 解析缺
 node scratch/cdp-media-fallback.mjs     # 视频兜底（<video> 播放 + 拖动）+ 图片空白面板兜底 + Range(206)
 node scratch/cdp-video-play-check.mjs "F:\\path\\video.mp4"   # 指定视频走网关能不能真起播（含 moov 在尾部的 mp4）
 node scratch/cdp-fallback-check.mjs     # 模拟 provider 缺失 → 兜底预览把文本和图片画回来
+node scratch/selfcheck-mobile-sidebar.mjs # 手机侧边栏抽屉：默认收起、点输入框不弹、点遮罩收起、桌面/平板不受影响
 node scratch/selfcheck-mobile-heal.mjs  # 自愈/兜底/老内核补齐 五个场景
 node scratch/selfcheck-sse.mjs 100      # /plugins/events 长连接存活
 ```
@@ -189,7 +190,32 @@ node scratch/selfcheck-sse.mjs 100      # /plugins/events 长连接存活
 > `cdp-phone-acceptance.mjs` / `cdp-media-fallback.mjs` 需要 `scratch/gw-test.png`（200x120）和 `scratch/gw-test.mp4`（3 秒）两个素材；
 > 验收脚本会自己把它们临时布点到「界面可能打开的那些会话工作区」里，跑完自动删除，不会留残留。
 
-> ⚠️ `mobile.js` / `mobile.css` 和 `gateway.js` 一样，**只在网关启动时读一次**，改完必须重启网关（`start-gateway.bat` 或 `start-gateway-hidden.vbs`）。
+> ⚠️ `mobile.js` / `mobile.css` 和 `gateway.js` 一样，**只在网关启动时读一次**，改完必须重启网关：双击 **`restart-gateway.bat`**（按「谁在监听 127.0.0.1:8443」结束进程，再隐藏启动并校验注入版本）。
+
+**症状：手机上侧边栏老是自己弹出来，挡住会话输入区（点一下输入框就弹）**
+
+不是样式问题，是注入脚本里的**状态判断失效**。旧代码用 `hHd-Xa_collapsed` 这个类判断抽屉是否收起：
+
+```js
+if (!root || root.classList.contains("hHd-Xa_collapsed")) return;   // ← 这个类后来不存在了
+```
+
+而 harness 0.2.2 起，抽屉开合状态改放在 `.pI_x6G_sidebarCol` 的**位置**上（关闭时整块 `translateX(-100%)` 到屏幕左侧外，`rect.right ≈ 0`），并且**不再有这个类**。于是守卫永远不生效：**任何一次侧边栏外的点击都会去点 toggle** —— 抽屉关着时被点成"打开"，表现就是"想在会话里打字，一点输入框侧边栏就弹出来挡视线"。
+
+现在的行为（`scratch/selfcheck-mobile-sidebar.mjs` 逐条验证）：
+
+| 场景 | 期望 |
+| --- | --- |
+| 打开页面 | 抽屉收起，不挡视线 |
+| 点输入框、点聊天区 | **不碰 toggle**（原 bug 回归点） |
+| 点左上角汉堡按钮 | 才打开 |
+| 点抽屉外的遮罩 | 收起（用 `Escape` 派发，实测点 toggle 会被重渲染吞掉） |
+| 抽屉内点导航（新建/选会话） | 由 harness 自己收起 |
+| 桌面 ≥1024px / 平板 800–1000px | 完全不介入（不会误收起/误撑开） |
+
+顺带修掉两处同类隐患：`mobile.css` 里原来那条 `:has(.hHd-Xa_root:not(.hHd-Xa_collapsed))` 覆盖规则（类不存在后它**永远命中**，会把 800–1000px 的 56px 图标栏强制撑成 340px 抽屉）已删除，断点改为与新版一致的 `<800px`。
+
+> 改完 `mobile.js` 记得用 `restart-gateway.bat` 重启。**旧做法按命令行文本匹配进程会漏掉用绝对路径启动的网关**，新进程因端口占用静默退出、旧代码继续服务——这次就是这么被坑的（8443 上跑着 10 天前的进程，改了代码却"看起来没生效"）。
 
 **症状：手机打开域名只看到一页英文**
 `The page you requested was not found ... The server is powered by frp. Faithfully yours, frp.`
